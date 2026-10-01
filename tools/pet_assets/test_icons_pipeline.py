@@ -77,10 +77,12 @@ class BuildIconsTests(unittest.TestCase):
         self.assertIn("pet_ui_dock_feed_20", header)
         self.assertIn("pet_ui_small_moon", header)
         self.assertIn("pet_ui_deco_sun30", header)
+        self.assertIn("pet_ui_deco_moon26", header)
         self.assertIn("1600u", header)  # 20x20x4
         self.assertIn("3600u", header)  # 30x30x4 decal
-        # 12 dock icons x 2 sizes + 8 small + 2 deco = 34 bitmaps.
-        self.assertEqual(source.count("] = {"), 34)
+        self.assertIn("2704u", header)  # 26x26x4 moon decal
+        # 12 dock icons x 2 sizes + 8 small + 3 deco = 35 bitmaps.
+        self.assertEqual(source.count("] = {"), 35)
 
     def test_bgra_byte_order(self) -> None:
         # Synthetic 1x1 red opaque RGBA must land as B,G,R,A = 00,00,ff,ff.

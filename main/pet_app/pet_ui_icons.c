@@ -107,10 +107,12 @@ const lv_image_dsc_t *pet_ui_small_dsc(pet_ui_small_t id)
 // ---- 房间贴花 ----
 static const lv_image_dsc_t DSC_SUN30 = ICON_DSC(pet_ui_deco_sun30, 30, 30);
 static const lv_image_dsc_t DSC_PLANT20 = ICON_DSC(pet_ui_deco_plant20, 18, 20);
+static const lv_image_dsc_t DSC_MOON26 = ICON_DSC(pet_ui_deco_moon26, 26, 26);
 
 static const lv_image_dsc_t *const DECO_DSC[PET_UI_DECO_COUNT] = {
     [PET_UI_DECO_SUN] = &DSC_SUN30,
     [PET_UI_DECO_PLANT] = &DSC_PLANT20,
+    [PET_UI_DECO_MOON] = &DSC_MOON26,
 };
 
 const lv_image_dsc_t *pet_ui_deco_dsc(pet_ui_deco_t id)

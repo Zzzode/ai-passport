@@ -27,6 +27,7 @@ typedef enum {
 typedef enum {
     PET_UI_DECO_SUN = 0,
     PET_UI_DECO_PLANT,
+    PET_UI_DECO_MOON,
     PET_UI_DECO_COUNT,
 } pet_ui_deco_t;
 

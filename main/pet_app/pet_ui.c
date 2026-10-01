@@ -51,6 +51,13 @@
 #define COL_PIP_OFF  0xE3D8C2
 #define COL_SEL      0xE17FA2
 #define COL_DOCK_BG  0xF2E2C6
+// 夜间房间（定稿 mockup 不透明色，避免 alpha 整屏合成）
+#define COL_NIGHT_WALL   0x34386B
+#define COL_NIGHT_FLOOR  0x222547
+#define COL_NIGHT_EDGE   0x3A3E73
+#define COL_NIGHT_RUG    0x191B38
+#define COL_NIGHT_SHADOW 0x14152E
+#define COL_NIGHT_STAR   0xFFF6C8
 
 #define LCD_W BSP_LCD_W
 #define LCD_H BSP_LCD_H
@@ -130,6 +137,7 @@ static const pet_art_provider_t s_pet_art = { pet_art_frame };
 static lv_obj_t *s_pet_canvas_obj;                 // 非蛋期合成画布（蛋/悼念页为 NULL）
 static uint8_t s_pose[PT_GENE_SLOT_COUNT];        // 当前各槽动画帧
 static bool s_pose_dirty = true;                  // 重建后强制重算一次
+static bool s_night_canvas;                      // 画布底色当前是否夜墙色
 static lv_obj_t *s_bubble;
 static lv_obj_t *s_bubble_txt;
 static lv_obj_t *s_poops;
@@ -419,6 +427,21 @@ static void egg_idle_anim(void)
     lv_anim_start(&a);
 }
 
+// RGB565 合成画布无 alpha：背景必须与宠物身后的墙同色，128x128 方块才隐形。
+// 夜间房间层是固定深蓝（不随主题变色），关灯时画布底填夜色，否则填主题墙色；
+// 灯光切换由刷新逻辑置 s_pose_dirty 触发重合成。
+static uint16_t canvas_wall565(void)
+{
+    if (s_snap.lights_off) {
+        return pt_rgb565_u32(COL_NIGHT_WALL);
+    }
+    const pt_theme_def_t *td = pt_theme_def((pt_theme_t) s_dsnap.theme);
+    if (td == NULL) {
+        td = pt_theme_def(PT_THEME_COZY);
+    }
+    return pt_rgb565_u32(td->wall);
+}
+
 static void build_creature(void)
 {
     const pt_state_t *s = &s_snap;
@@ -480,12 +503,8 @@ static void build_creature(void)
     }
 
     // P2-S2：L2 基因合成宠（designs 05 §5）。RGB565 无 alpha，背景填当前
-    // 房间墙色——房间为单色墙，方块视觉融合；主题切换时本函数随刷新重建。
-    const pt_theme_def_t *td = pt_theme_def((pt_theme_t) s_dsnap.theme);
-    if (td == NULL) {
-        td = pt_theme_def(PT_THEME_COZY);
-    }
-    uint16_t wall565 = pt_rgb565_u32(td->wall);
+    // 房间墙色——房间为单色墙，方块视觉融合；主题/灯光切换时随刷新重建。
+    uint16_t wall565 = canvas_wall565();
     pt_compose_pet(&s->genome, s_pose, wall565, s_pet_canvas_px, &s_pet_art);
     lv_obj_t *canvas = lv_canvas_create(s_creature);
     lv_canvas_set_buffer(canvas, s_pet_canvas_px, PT_COMPOSE_W, PT_COMPOSE_H,
@@ -495,6 +514,7 @@ static void build_creature(void)
     lv_obj_set_style_border_width(canvas, 0, 0);
     lv_obj_set_style_pad_all(canvas, 0, 0);
     s_pet_canvas_obj = canvas;
+    s_night_canvas = s->lights_off;
 
     // S4 穿戴层（05 §7.1：穿戴层在基因层之上）。坐标按 128x128 合成画布
     // （容器内偏移 -4,-8）标定；§5.3 表情帧（眨眼/吃/睡/病/呼吸）已在
@@ -639,6 +659,8 @@ static lv_obj_t *s_dockbox;
 #define DOCK_IMG_Y_SEL 9    // 25px：285..310，中线 297.5
 
 static int32_t s_slot_w;
+static pet_icon_t s_last_sel = PET_ICON_COUNT;   // 选中变化弹跳用；重建后为哨兵
+static int8_t s_dock_style[PET_ICON_COUNT];      // 每槽当前样式：-1 未知 / 0 普通 / 1 选中
 
 static int32_t slot_center(uint8_t i)
 {
@@ -663,7 +685,9 @@ static void dock_build_widgets(void)
     for (uint8_t i = 0; i < PET_ICON_COUNT; i += 1) {
         s_dock_w[i].box = NULL;
         s_dock_w[i].img = NULL;
+        s_dock_style[i] = -1;
     }
+    s_last_sel = PET_ICON_COUNT;   // 重建不触发弹跳
     lv_obj_clean(s_dockbox);
     s_slot_w = (DOCK_BAND_W - (int32_t) (s_dock.count - 1) * DOCK_GAP)
                / (int32_t) s_dock.count;
@@ -694,6 +718,12 @@ static void dock_refresh_selected(void)
             continue;
         }
         bool selected = (icon == sel);
+        int8_t want = selected ? 1 : 0;
+        // 仅在档位变化时改样式/坐标：避免每帧 set_pos 与弹跳 y 动画互相打架。
+        if (s_dock_style[icon] == want) {
+            continue;
+        }
+        s_dock_style[icon] = want;
         if (selected) {
             lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
             border(box, COL_SEL, 2);
@@ -706,6 +736,16 @@ static void dock_refresh_selected(void)
             lv_obj_set_pos(img, slot_center(i) - 10, DOCK_IMG_Y);
         }
     }
+    // 选中切槽：胶囊 + 25px 图标一起上跳 4px 再回落（定稿"放大 + 弹跳"）。
+    if (s_last_sel != PET_ICON_COUNT && s_last_sel != sel) {
+        lv_obj_t *box = s_dock_w[sel].box;
+        lv_obj_t *img = s_dock_w[sel].img;
+        if (box != NULL && img != NULL) {
+            bounce(box, DOCK_TILE_Y, -4, 170);
+            bounce(img, DOCK_IMG_Y_SEL, -4, 170);
+        }
+    }
+    s_last_sel = sel;
 }
 
 // ---------------------------------------------------------------------------
@@ -3733,18 +3773,15 @@ void pet_ui_button(pet_btn_t btn, pet_ev_t ev)
 // 定时刷新（LVGL 任务语境，已持锁）
 // ---------------------------------------------------------------------------
 
-// 05 §5.3：按各槽动画帧重合成画布。RGB565 无 alpha，底填仍取当前墙色；
-// 直接改外部缓冲后必须 lv_obj_invalidate 让 LVGL 重绘该区域。
+// 05 §5.3：按各槽动画帧重合成画布。RGB565 无 alpha，底填仍取当前墙色
+// （夜间为夜墙色，见 canvas_wall565）；直接改外部缓冲后必须 lv_obj_invalidate
+// 让 LVGL 重绘该区域。
 static void recompose_pet_canvas(void)
 {
     if (s_pet_canvas_obj == NULL) {
         return;
     }
-    const pt_theme_def_t *td = pt_theme_def((pt_theme_t) s_dsnap.theme);
-    if (td == NULL) {
-        td = pt_theme_def(PT_THEME_COZY);
-    }
-    uint16_t wall565 = pt_rgb565_u32(td->wall);
+    uint16_t wall565 = canvas_wall565();
     pt_compose_pet(&s_snap.genome, s_pose, wall565, s_pet_canvas_px,
                    &s_pet_art);
     lv_obj_invalidate(s_pet_canvas_obj);
@@ -4075,11 +4112,16 @@ static void refresh(lv_timer_t *timer)
         hide(s_bubble);
     }
 
-    // 关灯后的夜罩
+    // 关灯后的夜间房间层
     if (s_snap.lights_off) {
         show(s_night);
     } else {
         hide(s_night);
+    }
+    // RGB565 画布无 alpha：灯光一切，画布底色要跟着换成夜墙色/主题墙色。
+    if (s_pet_canvas_obj != NULL && s_night_canvas != s_snap.lights_off) {
+        s_night_canvas = s_snap.lights_off;
+        s_pose_dirty = true;   // 紧接着的 update_creature_mood 会重合成
     }
 
     update_creature_mood();
@@ -4178,9 +4220,38 @@ void pet_ui_init(void)
     lv_obj_t *shadow = rect(s_room, 80, 182, 80, 12, 6, COL_SHADOW);
     lv_obj_set_style_border_width(shadow, 0, 0);
     lv_obj_set_style_bg_opa(shadow, 140, 0);
-    // 太阳/盆栽贴花（夜罩盖上后随墙一起消失）
+    // 太阳/盆栽贴花（白天显示；夜间层在其上方直接盖住）
     icon_img(s_room, 191, 9, pet_ui_deco_dsc(PET_UI_DECO_SUN));
     icon_img(s_room, 13, 165, pet_ui_deco_dsc(PET_UI_DECO_PLANT));
+
+    // 夜间房间层（定稿 mockup）：不透明深蓝墙/地 + 月亮星星 + 暗色地毯。
+    // z 序在家具/宠物之下——盖住白天墙地贴花，宠物、气泡、Zzz 仍留在画面里。
+    // 全用不透明色块：整屏 alpha 合成在模拟器软件渲染下会触发 WDT。
+    s_night = lv_obj_create(s_room);
+    lv_obj_remove_flag(s_night, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_night, 0, 0);
+    lv_obj_set_size(s_night, LCD_W, 226);
+    lv_obj_set_style_bg_opa(s_night, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_night, 0, 0);
+    lv_obj_set_style_pad_all(s_night, 0, 0);
+    rect(s_night, 0, 0, LCD_W, 186, 0, COL_NIGHT_WALL);
+    rect(s_night, 0, 186, LCD_W, 40, 0, COL_NIGHT_FLOOR);
+    rect(s_night, 0, 186, LCD_W, 2, 0, COL_NIGHT_EDGE);
+    lv_obj_t *n_shadow = rect(s_night, 80, 182, 80, 12, 6, COL_NIGHT_SHADOW);
+    lv_obj_set_style_border_width(n_shadow, 0, 0);
+    lv_obj_t *n_rug = rect(s_night, 64, 182, 112, 16, 8, COL_NIGHT_RUG);
+    lv_obj_set_style_border_width(n_rug, 0, 0);
+    // mockup 月亮屏坐标 (200,58) r12 → 房间 (200,32)；26px 贴图左上 (187,19)
+    icon_img(s_night, 187, 19, pet_ui_deco_dsc(PET_UI_DECO_MOON));
+    static const int8_t night_star_xy[5][2] = {
+        { 35, 43 }, { 59, 21 }, { 119, 13 }, { 219, 93 }, { 23, 103 },
+    };
+    for (int i = 0; i < 5; i += 1) {
+        lv_obj_t *nst = rect(s_night, night_star_xy[i][0],
+                             night_star_xy[i][1], 2, 2, 1, COL_NIGHT_STAR);
+        lv_obj_set_style_border_width(nst, 0, 0);
+    }
+    hide(s_night);
 
     // S4 家具标记层（在宠物之下）
     s_furn_layer = lv_obj_create(s_room);
@@ -4232,12 +4303,6 @@ void pet_ui_init(void)
     lv_obj_set_style_bg_opa(s_poops, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_poops, 0, 0);
     lv_obj_set_style_pad_all(s_poops, 0, 0);
-
-    s_night = rect(s_room, 0, 0, LCD_W, 226, 0, 0x101028);
-    // 不透明黑屏（不用 alpha：整屏合成在模拟器软件渲染下会触发 WDT；
-    // 原拓麻歌子关灯也是整屏变黑）。奶油顶栏在罩层之外，日月切成月亮。
-    lv_obj_set_style_bg_opa(s_night, LV_OPA_COVER, 0);
-    hide(s_night);
 
     // 情境提示胶囊（地板下缘居中，仅子模式/临时消息可见）
     s_caption = rect(s_scr, 60, 236, 120, 16, 8, COL_CREAM);
