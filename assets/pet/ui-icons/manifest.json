@@ -1,0 +1,39 @@
+{
+  "format_version": 1,
+  "dock": [
+    "feed",
+    "wc",
+    "status",
+    "light",
+    "med",
+    "game",
+    "pat",
+    "shop",
+    "job",
+    "family",
+    "album",
+    "settings"
+  ],
+  "small": [
+    "bowl",
+    "hg",
+    "hy",
+    "he",
+    "hp",
+    "smile",
+    "sun",
+    "moon"
+  ],
+  "deco": [
+    {
+      "name": "sun30",
+      "w": 30,
+      "h": 30
+    },
+    {
+      "name": "plant20",
+      "w": 18,
+      "h": 20
+    }
+  ]
+}

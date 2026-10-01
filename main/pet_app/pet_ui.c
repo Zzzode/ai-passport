@@ -1,0 +1,4364 @@
+#include "pet_ui.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "bsp_battery.h"
+#include "bsp_display.h"
+#include "bsp_pins.h"
+#include "lvgl.h"
+
+#include "pet_app.h"
+#include "pet_audio.h"
+#include "pet_clock.h"
+#include "pet_decor.h"
+#include "pet_dock.h"
+#include "pet_game.h"
+#include "pet_games2.h"
+#include "pet_jobs.h"
+#include "pt_config.h"
+#include "pt_evolve.h"
+#include "pt_compose.h"
+#include "pet_parts_data.h"
+#include "pet_ui_icons.h"
+
+
+
+// ---------------------------------------------------------------------------
+// 配色（马卡龙底色 + 深描边，designs 10 §2）
+// ---------------------------------------------------------------------------
+
+#define COL_BG       0xFFF6E6
+#define COL_ROOM     0xDDF3E4
+#define COL_ROOM_TOP 0xEAF9EE
+#define COL_FLOOR    0xC6E6CC
+#define COL_FLOOR_EDGE 0xA8D8B2
+#define COL_RUG      0xB9DCC0
+#define COL_SHADOW   0x9FCFA9
+#define COL_CREAM    0xFFF6E6
+#define COL_DOCK_BAND 0xF3E4CE
+#define COL_DOCK_EDGE 0xD1C3B2
+#define COL_PILL_PINK 0xFFE3EC
+#define COL_PILL_BLUE 0xE7F0FF
+#define COL_INK      0x4A3F45
+#define COL_PANEL    0xFFFBF2
+#define COL_DIM      0x3A2F2A
+#define COL_GREEN    0x55B96B
+#define COL_YELLOW   0xF2B134
+#define COL_RED      0xE05B5B
+#define COL_BLUE     0x5B8DE0
+#define COL_BROWN    0x9C7A4E
+#define COL_PIP_OFF  0xE3D8C2
+#define COL_SEL      0xE17FA2
+#define COL_DOCK_BG  0xF2E2C6
+
+#define LCD_W BSP_LCD_W
+#define LCD_H BSP_LCD_H
+
+// ---------------------------------------------------------------------------
+// 界面模式与瞬态
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    MODE_ROOM = 0,
+    MODE_LIST,      // 喂食 / 设置 通用列表弹层
+    MODE_STATUS,    // 状态分页
+    MODE_GAME,      // G1 猜大小
+    MODE_GAMES,     // 游戏选择器（G1–G6）
+    MODE_GX,        // G2–G6 运行时
+    MODE_JOB,       // 成年职业办公室
+    MODE_AGENCY,    // 职介所
+    MODE_SHOP,      // 商店 / 背包（P1 经济）
+    MODE_DECOR,     // 换装 / 家具 / 主题（P1-S4）
+    MODE_CHECKIN,   // 每日签到弹层
+    MODE_MATE,      // 婚介/家庭（P2-S3a）
+    MODE_DEX,       // 图鉴（P2-S4）
+    MODE_OVERLAY,   // 孵化 / 进化全屏演出（锁输入）
+    MODE_MEMORIAL,  // 死亡纪念
+} ui_mode_t;
+
+enum { LIST_FOOD = 0, LIST_SETTINGS };
+enum { MOOD_NORMAL = 0, MOOD_HAPPY, MOOD_EAT };
+enum { PHASE_CHOOSE = 0, PHASE_RESULT };
+enum { EFF_NONE = 0, EFF_HATCH, EFF_EVOLVE };
+
+typedef struct {
+    lv_obj_t *box;
+    lv_obj_t *img;
+} dock_widget_t;
+
+static lv_obj_t *s_scr;
+static lv_timer_t *s_timer;
+
+// 顶栏
+static lv_obj_t *s_top_stage;
+static lv_obj_t *s_clock;
+static lv_obj_t *s_celestial;          // 日月 12px 图片
+static lv_obj_t *s_battery;
+
+// 微状态行（PV1 象形版：碗 + 4 心 / 笑 + 4 心 + 体重胶囊 + 羁绊心）
+static lv_obj_t *s_heart_full[4];
+static lv_obj_t *s_heart_fun[4];
+static lv_obj_t *s_weight_lbl;
+static lv_obj_t *s_bond_lbl;
+
+// 房间
+static lv_obj_t *s_room;
+static lv_obj_t *s_wall_top;
+static lv_obj_t *s_floor_obj;
+static lv_obj_t *s_floor_edge;
+static lv_obj_t *s_creature;
+static lv_obj_t *s_furn_layer;   // S4 已摆放功能家具的几何标记层
+static lv_obj_t *s_star[6];      // 星空主题点缀
+static lv_obj_t *s_eye[4][2];     // normal/happy/sleep/sick（几何蛋期不再使用，保留 NULL 安全切换）
+static lv_obj_t *s_mouth[2];      // normal/eat
+static lv_obj_t *s_zz;
+
+// P2-S2：基因合成画布缓冲（05 §5.2：无 PSRAM，严格单实例、可复用，32 KiB）。
+static uint16_t s_pet_canvas_px[PT_COMPOSE_PIXELS];
+static const uint8_t *pet_art_frame(int slot, uint8_t index, uint8_t frame,
+                                    uint16_t *bytes)
+{
+    const pet_part_art_t *a = pet_parts_art(slot, index);
+    if (a == NULL || frame >= a->frame_count) {
+        return NULL;
+    }
+    *bytes = a->bytes[frame];
+    return a->rle[frame];
+}
+static const pet_art_provider_t s_pet_art = { pet_art_frame };
+static lv_obj_t *s_pet_canvas_obj;                 // 非蛋期合成画布（蛋/悼念页为 NULL）
+static uint8_t s_pose[PT_GENE_SLOT_COUNT];        // 当前各槽动画帧
+static bool s_pose_dirty = true;                  // 重建后强制重算一次
+static lv_obj_t *s_bubble;
+static lv_obj_t *s_bubble_txt;
+static lv_obj_t *s_poops;
+static lv_obj_t *s_night;
+
+// 微状态行（PV1 象形版：碗/笑 + 四心计量 + 体重胶囊 + 羁绊值，对象在 init 里创建）
+
+// 图标坞与说明
+static pet_dock_t s_dock;
+static dock_widget_t s_dock_w[PET_ICON_COUNT];
+static lv_obj_t *s_caption;       // 情境提示胶囊（房间底部，平时隐藏）
+static lv_obj_t *s_caption_txt;
+
+// 弹层
+static lv_obj_t *s_modal;
+static lv_obj_t *s_modal_title;
+static lv_obj_t *s_modal_body;
+static lv_obj_t *s_list_row[6];
+static lv_obj_t *s_game_card;
+static lv_obj_t *s_game_hi;
+static lv_obj_t *s_game_lo;
+static lv_obj_t *s_game_result;
+static lv_obj_t *s_game_wins;
+static lv_obj_t *s_game_hint;
+
+// 全屏演出与纪念
+static lv_obj_t *s_eff_cont;
+static lv_obj_t *s_eff_txt;
+static lv_obj_t *s_memorial;
+static lv_obj_t *s_memorial_name;
+static lv_obj_t *s_memorial_line;
+static lv_obj_t *s_memorial_tier;
+
+static ui_mode_t s_mode = MODE_ROOM;
+static int s_list_kind;
+static int s_list_sel;
+static int s_list_count;
+static int s_status_page;
+
+static pet_game_t s_game;
+static int s_g_phase;
+static int s_g_choice;
+static int64_t s_g_exit_armed_until;
+
+// 游戏选择器
+static int8_t s_games_sel;
+static lv_obj_t *s_games_row[PT_GAME_COUNT];
+
+// G2–G6 统一运行时
+static uint8_t s_gx_id;
+static uint8_t s_gx_phase;        // 0=READY 1=进行中 2=结算
+static int64_t s_gx_t0;
+static int64_t s_gx_next_ms;
+static int64_t s_gx_exit_armed_until;
+static uint8_t s_gx_sel;          // G4/G6 当前选项
+static uint8_t s_g4_lit;          // G4 演示阶段点亮的键位
+static int16_t s_g2_from;         // G2 本拍起始端（-100/100）
+static pet_g2_t s_g2;
+static pet_g3_t s_g3;
+static pet_g4_t s_g4;
+static pet_g5_t s_g5;
+static pet_g6_t s_g6;
+static bool s_gx_job;         // true=打工短关（结算走工资，非游戏奖金）
+static lv_obj_t *s_gx_info;
+static lv_obj_t *s_gx_hint;
+static lv_obj_t *s_gx_mk[8];
+static lv_obj_t *s_gx_ml[4];
+
+// 成年职业（S3）
+static pt_jobs_t s_jobs;
+static int8_t s_job_sel;
+static int8_t s_agency_sel;
+static pt_job_id_t s_agency_ids[PT_JOB_COUNT];
+static uint8_t s_agency_n;
+static lv_obj_t *s_job_row[2];
+static lv_obj_t *s_agency_row[PT_JOB_COUNT];
+static bool s_g1_job;
+
+static int s_eff_kind = EFF_NONE;
+static int64_t s_eff_t0;
+static bool s_eff_rebuilt;
+
+static int s_mood = MOOD_NORMAL;
+static int64_t s_mood_until;
+static int64_t s_next_blink;
+static int64_t s_blink_until;
+
+static char s_msg[40];
+static int64_t s_msg_until;
+
+static pt_state_t s_snap;
+static pt_econ_t s_esnap;
+static pt_state_t s_prev;
+static bool s_have_prev;
+static bool s_checkin_prompted;   // 本次开机是否已弹过签到
+
+// 商店/背包视图
+static bool s_shop_bag;           // false=货架, true=背包
+static uint8_t s_shop_page;
+static uint8_t s_shop_sel;
+static uint8_t s_shop_rows;       // 当前页渲染的行数
+static uint16_t s_shop_row_item[6];
+static uint8_t s_shop_row_kind[6];   // 0=物品 1=More 2=Shop/Bag 切换 3=签到 4=Style
+static bool s_shop_dirty;
+
+// 换装/家具/主题（S4）
+static pt_decor_t s_dsnap;
+static pt_decor_t s_dprev;
+static bool s_have_dprev;
+static uint8_t s_dec_tab;        // 0=Wear 1=Room 2=Theme
+static uint8_t s_dec_page;
+static uint8_t s_dec_sel;
+static uint8_t s_dec_rows;
+static uint16_t s_dec_row_id[6];
+static uint8_t s_dec_row_kind[6];   // 0=条目 1=More 2=Tab 切换
+static bool s_dec_dirty;
+static int s_battery_cache = -2;
+static int s_battery_div;
+static bool s_bubble_anim_on;
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+
+static lv_obj_t *rect(lv_obj_t *parent, int32_t x, int32_t y, int32_t w, int32_t h,
+                      int32_t radius, uint32_t color)
+{
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(o, x, y);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_style_radius(o, radius, 0);
+    lv_obj_set_style_bg_color(o, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    return o;
+}
+
+static void border(lv_obj_t *o, uint32_t color, int32_t width)
+{
+    lv_obj_set_style_border_color(o, lv_color_hex(color), 0);
+    lv_obj_set_style_border_width(o, width, 0);
+    lv_obj_set_style_border_opa(o, LV_OPA_COVER, 0);
+}
+
+static lv_obj_t *label(lv_obj_t *parent, int32_t x, int32_t y, int32_t w,
+                       const lv_font_t *font, uint32_t color, const char *text)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_obj_set_pos(l, x, y);
+    if (w > 0) {
+        lv_obj_set_width(l, w);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    }
+    lv_obj_set_style_text_font(l, font, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(color), 0);
+    lv_label_set_text(l, text);
+    return l;
+}
+
+static void show(lv_obj_t *o) { lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN); }
+static void hide(lv_obj_t *o) { lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); }
+
+static void set_msg(const char *text, int ms)
+{
+    snprintf(s_msg, sizeof(s_msg), "%s", text);
+    s_msg_until = (int64_t) lv_tick_get() + ms;
+}
+
+static int64_t now_ms(void) { return (int64_t) lv_tick_get(); }
+
+// 容器基准位置（CREATURE_X/Y）：所有位移动画都必须以基准为起点写绝对坐标——
+// lv_anim 的 exec_cb 直接改 style x/y，若写 0/-3 这类"相对值"，动画一启动
+// 就会把对象从基准位置永久拽到屏幕左上角（历史 bug：宠物长期出现在左上）。
+#define CREATURE_X 60
+#define CREATURE_Y 56
+
+static void bounce(lv_obj_t *o, int32_t base, int32_t dist, uint32_t ms)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, o);
+    lv_anim_set_values(&a, base, base + dist);
+    lv_anim_set_duration(&a, ms);
+    lv_anim_set_playback_duration(&a, ms);
+    lv_anim_set_path_cb(&a, lv_anim_path_overshoot);
+    lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t) lv_obj_set_y);
+    lv_anim_start(&a);
+}
+
+// 名称表（原创占位英文名，designs 04 §8 命名待定）
+static const char *species_name(pt_species_t sp)
+{
+    switch (sp) {
+    case PT_SP_EGG: return "Egg";
+    case PT_SP_BABY: return "Bao";
+    case PT_SP_CHILD: return "Bean";
+    case PT_SP_TEEN_A: return "Mochi";
+    case PT_SP_TEEN_B: return "Goo";
+    case PT_SP_TEEN_C: return "Fuzz";
+    case PT_SP_ADULT_PERFECT: return "Snowball";
+    case PT_SP_ADULT_GREAT: return "Marsh";
+    case PT_SP_ADULT_NORMAL: return "Riceball";
+    case PT_SP_ADULT_NEGLECT: return "Soot";
+    case PT_SP_ADULT_MOON: return "Moonshade";
+    default: return "Pet";
+    }
+}
+
+static const char *stage_name(pt_stage_t st)
+{
+    switch (st) {
+    case PT_STAGE_EGG: return "EGG";
+    case PT_STAGE_BABY: return "BABY";
+    case PT_STAGE_CHILD: return "CHILD";
+    case PT_STAGE_TEEN: return "TEEN";
+    case PT_STAGE_ADULT: return "ADULT";
+    case PT_STAGE_SENIOR: return "SENIOR";
+    default: return "--";
+    }
+}
+
+static const char *call_text(pt_call_kind_t call)
+{
+    switch (call) {
+    case PT_CALL_HUNGRY: return "!";
+    case PT_CALL_SAD: return "?";
+    case PT_CALL_LIGHTS: return "z";
+    default: return "";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 角色程序化绘制
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    uint8_t w, h, radius;
+    uint32_t body, edge, belly, cheek;
+    uint8_t ears;      // 0 无 / 1 圆耳 / 2 尖耳
+    bool dark_eyes;    // 深色身体用浅色眼睛
+    bool crescent;     // 月影额头标记
+} profile_t;
+
+static const profile_t *profile_for(pt_stage_t stage, pt_species_t sp)
+{
+    static const profile_t EGG = { 60, 74, 30, 0xFFFFFF, 0xC9BEB0, 0, 0, 0, false, false };
+    static const profile_t BABY = { 70, 64, 32, 0xFFE27A, 0xD9A93B, 0xFFF3BF, 0xF7B7A8, 1, false, false };
+    static const profile_t CHILD = { 68, 70, 30, 0xF3C68F, 0xC99456, 0xFBE7C8, 0xF2A0A0, 1, false, false };
+    static const profile_t TEEN_A = { 76, 68, 34, 0xF6B8C9, 0xD88AA3, 0xFBD9E4, 0xF48FA0, 2, false, false };
+    static const profile_t TEEN_B = { 72, 72, 36, 0xA8D8EA, 0x6FA8C4, 0xD8F0FA, 0xF2A0A0, 1, false, false };
+    static const profile_t TEEN_C = { 80, 70, 34, 0xB9E09A, 0x86B366, 0xDCF0C8, 0xF2A0A0, 1, false, false };
+    static const profile_t PERF = { 88, 76, 40, 0xFBFBF6, 0xBFC4C9, 0xF1F1EA, 0xF4A8B8, 1, false, false };
+    static const profile_t GREAT = { 92, 72, 36, 0xFCD2E2, 0xE497B8, 0xFEE9F1, 0xF48FA0, 2, false, false };
+    static const profile_t NORMAL = { 84, 74, 22, 0xE7DEC8, 0xB8A784, 0xF4EDDB, 0xEAA99E, 0, false, false };
+    static const profile_t NEGLECT = { 76, 72, 36, 0x5B5566, 0x3E3A48, 0x77707F, 0, 0, true, false };
+    static const profile_t MOON = { 86, 78, 40, 0x3E3E68, 0x27274A, 0x5A5A8E, 0, 2, true, true };
+
+    if (stage == PT_STAGE_EGG) { return &EGG; }
+    switch (sp) {
+    case PT_SP_BABY: return &BABY;
+    case PT_SP_CHILD: return &CHILD;
+    case PT_SP_TEEN_A: return &TEEN_A;
+    case PT_SP_TEEN_B: return &TEEN_B;
+    case PT_SP_TEEN_C: return &TEEN_C;
+    case PT_SP_ADULT_PERFECT: return &PERF;
+    case PT_SP_ADULT_GREAT: return &GREAT;
+    case PT_SP_ADULT_NORMAL: return &NORMAL;
+    case PT_SP_ADULT_NEGLECT: return &NEGLECT;
+    case PT_SP_ADULT_MOON: return &MOON;
+    default: return &CHILD;
+    }
+}
+
+static void egg_idle_anim(void)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_creature);
+    // 绝对坐标 = 基准 X ± 3，不能写 -3..3（会把容器拽离 CREATURE_X）。
+    lv_anim_set_values(&a, CREATURE_X - 3, CREATURE_X + 3);
+    lv_anim_set_duration(&a, 320);
+    lv_anim_set_playback_duration(&a, 320);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t) lv_obj_set_x);
+    lv_anim_start(&a);
+}
+
+static void build_creature(void)
+{
+    const pt_state_t *s = &s_snap;
+    lv_anim_delete(s_creature, NULL);
+    // 复位基准位置：上个阶段的摆动/反应动画被删时样式值可能停在中途，
+    // 不复位会把偏移带进新阶段。
+    lv_obj_set_pos(s_creature, CREATURE_X, CREATURE_Y);
+    lv_obj_clean(s_creature);
+    for (int r = 0; r < 4; r += 1) {
+        s_eye[r][0] = s_eye[r][1] = NULL;
+    }
+    s_mouth[0] = s_mouth[1] = NULL;
+    s_zz = NULL;
+    s_pet_canvas_obj = NULL;
+    memset(s_pose, 0, sizeof(s_pose));
+    s_pose_dirty = true;
+
+    if (s->stage == PT_STAGE_DEAD) {
+        return;   // 纪念页全屏接管
+    }
+
+    int32_t W = 120;
+    int32_t cx = W / 2;
+
+    if (s->stage == PT_STAGE_EGG) {
+        const profile_t *p = profile_for(s->stage, s->species);
+        int32_t bx = (W - p->w) / 2;
+        int32_t by = 112 - 12 - p->h;
+
+        if (p->ears == 1) {
+            lv_obj_t *e1 = rect(s_creature, bx + 6, by - 7, 15, 15, 7, p->body);
+            lv_obj_t *e2 = rect(s_creature, bx + p->w - 21, by - 7, 15, 15, 7, p->body);
+            border(e1, p->edge, 2);
+            border(e2, p->edge, 2);
+        } else if (p->ears == 2) {
+            rect(s_creature, bx + 8, by - 6, 9, 12, 3, p->body);
+            rect(s_creature, bx + p->w - 17, by - 6, 9, 12, 3, p->body);
+        }
+        lv_obj_t *body = rect(s_creature, bx, by, p->w, p->h, p->radius, p->body);
+        border(body, p->edge, 2);
+        if (p->belly != 0) {
+            int32_t bw = (int32_t) p->w * 56 / 100;
+            int32_t bh = (int32_t) p->h * 30 / 100;
+            rect(s_creature, cx - bw / 2, by + p->h - bh - 9, bw, bh, bh / 2, p->belly);
+        }
+        rect(s_creature, bx + (int32_t) p->w * 16 / 100, by + p->h - 5, 13, 7, 3, p->edge);
+        rect(s_creature, bx + (int32_t) p->w * 68 / 100, by + p->h - 5, 13, 7, 3, p->edge);
+        int32_t spots[4][2] = {
+            { bx + 14, by + 20 }, { bx + p->w - 22, by + 28 },
+            { bx + 22, by + p->h - 22 }, { bx + p->w - 16, by + p->h - 16 },
+        };
+        for (int i = 0; i < 4; i += 1) {
+            rect(s_creature, spots[i][0], spots[i][1], 5, 5, 2, p->edge);
+        }
+        // 蛋期待孵化：左右轻晃（全屏弹层打开时暂停，关闭后由 modal_close 恢复，
+        // 避免动画失效区与全屏重绘在模拟器软件渲染下抢 CPU）。
+        egg_idle_anim();
+        return;
+    }
+
+    // P2-S2：L2 基因合成宠（designs 05 §5）。RGB565 无 alpha，背景填当前
+    // 房间墙色——房间为单色墙，方块视觉融合；主题切换时本函数随刷新重建。
+    const pt_theme_def_t *td = pt_theme_def((pt_theme_t) s_dsnap.theme);
+    if (td == NULL) {
+        td = pt_theme_def(PT_THEME_COZY);
+    }
+    uint16_t wall565 = pt_rgb565_u32(td->wall);
+    pt_compose_pet(&s->genome, s_pose, wall565, s_pet_canvas_px, &s_pet_art);
+    lv_obj_t *canvas = lv_canvas_create(s_creature);
+    lv_canvas_set_buffer(canvas, s_pet_canvas_px, PT_COMPOSE_W, PT_COMPOSE_H,
+                         LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_pos(canvas, -4, -8);
+    lv_obj_remove_flag(canvas, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_border_width(canvas, 0, 0);
+    lv_obj_set_style_pad_all(canvas, 0, 0);
+    s_pet_canvas_obj = canvas;
+
+    // S4 穿戴层（05 §7.1：穿戴层在基因层之上）。坐标按 128x128 合成画布
+    // （容器内偏移 -4,-8）标定；§5.3 表情帧（眨眼/吃/睡/病/呼吸）已在
+    // update_creature_mood 按槽切帧重合成。
+    for (uint8_t slot = 0; slot < PT_SLOT_COUNT; slot += 1) {
+        pt_outfit_t oid = pt_decor_worn(&s_dsnap, (pt_slot_t) slot);
+        if (oid == PT_OUTFIT_NONE) {
+            continue;
+        }
+        switch (oid) {
+        case PT_OUTFIT_CAP:
+            rect(s_creature, cx - 15, 0, 30, 4, 2, 0x3E6FD0);
+            rect(s_creature, cx - 11, -6, 22, 9, 5, 0x4E86E6);
+            break;
+        case PT_OUTFIT_TOPHAT:
+            rect(s_creature, cx - 15, 0, 30, 3, 1, 0x33292A);
+            rect(s_creature, cx - 9, -11, 18, 13, 2, 0x33292A);
+            break;
+        case PT_OUTFIT_STARHAT:
+            rect(s_creature, cx - 10, -2, 20, 12, 4, 0x7B5EA8);
+            rect(s_creature, cx - 3, -7, 7, 7, 3, 0xFFD84D);
+            rect(s_creature, cx - 13, 3, 26, 3, 1, 0xFFD84D);
+            break;
+        case PT_OUTFIT_GLASSES: {
+            lv_obj_t *g1 = rect(s_creature, 38, 60, 12, 9, 3, 0xFFFFFF);
+            lv_obj_t *g2 = rect(s_creature, 70, 60, 12, 9, 3, 0xFFFFFF);
+            border(g1, 0x3A2F2A, 2);
+            border(g2, 0x3A2F2A, 2);
+            break;
+        }
+        case PT_OUTFIT_SCARF:
+            rect(s_creature, cx - 24, 92, 48, 6, 3, 0xE05B5B);
+            break;
+        case PT_OUTFIT_BALLOON: {
+            lv_obj_t *ball = rect(s_creature, 100, 0, 13, 13, 7, 0xF07A96);
+            border(ball, 0xB84564, 1);
+            rect(s_creature, 106, 14, 1, 9, 0, 0xB84564);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    s_zz = label(s_creature, 82, 2, 30, &lv_font_montserrat_20, COL_BLUE, "Z");
+    hide(s_zz);
+}
+
+static void build_poops(void)
+{
+    lv_obj_clean(s_poops);
+    uint8_t n = s_snap.poops;
+    for (uint8_t i = 0; i < n; i += 1) {
+        int32_t x = 120 - (int32_t) n * 9 + (int32_t) i * 18;
+        lv_obj_t *o = rect(s_poops, x, 8, 14, 11, 5, COL_BROWN);
+        border(o, 0x6E5436, 2);
+    }
+}
+
+// S4：房间主题换壁纸色；星空主题额外显示固定星点。
+static void apply_room_theme(void)
+{
+    const pt_theme_def_t *td = pt_theme_def((pt_theme_t) s_dsnap.theme);
+    if (td == NULL) {
+        td = pt_theme_def(PT_THEME_COZY);
+    }
+    // Cozy 固定为定稿的马卡龙绿；其他主题用其墙色压暗推地板色。
+    uint32_t wall = COL_ROOM_TOP;
+    if (s_dsnap.theme != PT_THEME_COZY) {
+        wall = td->wall;
+    }
+    lv_obj_set_style_bg_color(s_room, lv_color_hex(wall), 0);
+    lv_obj_set_style_bg_color(s_wall_top, lv_color_hex(wall), 0);
+    uint32_t floor;
+    if (s_dsnap.theme == PT_THEME_COZY) {
+        floor = COL_FLOOR;
+    } else {
+        // 墙色压暗 18%，边缘再压一档。
+        uint32_t r = (wall >> 16) & 0xFF;
+        uint32_t g = (wall >> 8) & 0xFF;
+        uint32_t b = wall & 0xFF;
+        r = (r * 82) / 100;
+        g = (g * 82) / 100;
+        b = (b * 82) / 100;
+        floor = (r << 16) | (g << 8) | b;
+    }
+    lv_obj_set_style_bg_color(s_floor_obj, lv_color_hex(floor), 0);
+    uint32_t edge = (((((floor >> 16) & 0xFF) * 82) / 100) << 16)
+                  | ((((floor >> 8) & 0xFF) * 82) / 100 << 8)
+                  | (((floor & 0xFF) * 82) / 100);
+    lv_obj_set_style_bg_color(s_floor_edge, lv_color_hex(edge), 0);
+    bool stars = s_dsnap.theme == PT_THEME_STARRY;
+    for (uint8_t i = 0; i < 6; i += 1) {
+        if (s_star[i] != NULL) {
+            if (stars) {
+                show(s_star[i]);
+            } else {
+                hide(s_star[i]);
+            }
+        }
+    }
+}
+
+// S4：已摆放功能家具的极简几何标记（每件固定位置，不放 3 件以上）。
+static void build_furniture(void)
+{
+    if (s_furn_layer == NULL) {
+        return;
+    }
+    lv_obj_clean(s_furn_layer);
+    // 盆栽：左下；健身角：右上；厨房：左上。
+    if (pt_decor_is_placed(&s_dsnap, PT_FURN_PLANT)) {
+        rect(s_furn_layer, 4, 128, 16, 10, 2, 0xB06A3E);   // 盆
+        lv_obj_t *leaf = rect(s_furn_layer, 2, 110, 20, 20, 10, 0x4F9E54);
+        border(leaf, 0x35723A, 1);
+    }
+    if (pt_decor_is_placed(&s_dsnap, PT_FURN_GYM)) {
+        rect(s_furn_layer, 206, 30, 20, 4, 2, 0x5A6270);   // 杠
+        rect(s_furn_layer, 202, 26, 6, 12, 2, 0x3A4250);
+        rect(s_furn_layer, 224, 26, 6, 12, 2, 0x3A4250);
+    }
+    if (pt_decor_is_placed(&s_dsnap, PT_FURN_KITCHEN)) {
+        rect(s_furn_layer, 6, 28, 22, 20, 3, 0xD9C9B4);    // 柜
+        lv_obj_t *pot = rect(s_furn_layer, 9, 18, 16, 12, 3, 0x8A94A6);
+        border(pot, 0x5F6776, 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 图标坞
+// ---------------------------------------------------------------------------
+
+static lv_obj_t *s_dockbox;
+
+// 坞带几何（与定稿 mockup 一致：276..320，槽中线 298，图标 20/选中 25）
+#define DOCK_GAP       2
+#define DOCK_START_X   6
+#define DOCK_BAND_W    228
+#define DOCK_TILE_Y    4    // 相对 dockbox(276)：胶囊 36 高 → 280..316
+#define DOCK_TILE_H    36
+#define DOCK_IMG_Y     12   // 20px：288..308，中线 298
+#define DOCK_IMG_Y_SEL 9    // 25px：285..310，中线 297.5
+
+static int32_t s_slot_w;
+
+static int32_t slot_center(uint8_t i)
+{
+    return DOCK_START_X + (int32_t) i * (s_slot_w + DOCK_GAP)
+           + s_slot_w / 2 + (s_slot_w % 2);
+}
+
+static lv_obj_t *icon_img(lv_obj_t *parent, int32_t x, int32_t y,
+                          const lv_image_dsc_t *dsc)
+{
+    lv_obj_t *o = lv_image_create(parent);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(o, x, y);
+    lv_image_set_src(o, dsc);
+    return o;
+}
+
+static void dock_build_widgets(void)
+{
+    // 依据当前阶段 + 药解锁状态重建坞内容（图标按阶段长出来）。
+    pet_dock_build(&s_dock, s_snap.stage, pet_app_med_unlocked());
+    for (uint8_t i = 0; i < PET_ICON_COUNT; i += 1) {
+        s_dock_w[i].box = NULL;
+        s_dock_w[i].img = NULL;
+    }
+    lv_obj_clean(s_dockbox);
+    s_slot_w = (DOCK_BAND_W - (int32_t) (s_dock.count - 1) * DOCK_GAP)
+               / (int32_t) s_dock.count;
+    for (uint8_t i = 0; i < s_dock.count; i += 1) {
+        pet_icon_t icon = s_dock.icons[i];
+        int32_t x = DOCK_START_X + (int32_t) i * (s_slot_w + DOCK_GAP);
+        // 槽胶囊：常态全透明；选中态刷奶油底 + 粉描边。
+        lv_obj_t *box = rect(s_dockbox, x, DOCK_TILE_Y, s_slot_w, DOCK_TILE_H,
+                             10, COL_CREAM);
+        lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+        int32_t cx = slot_center(i);
+        lv_obj_t *img = icon_img(s_dockbox, cx - 10, DOCK_IMG_Y,
+                                 pet_ui_dock_dsc(icon, false));
+        s_dock_w[icon].box = box;
+        s_dock_w[icon].img = img;
+    }
+    pet_dock_focus_call(&s_dock, s_snap.active_call);
+}
+
+static void dock_refresh_selected(void)
+{
+    pet_icon_t sel = pet_dock_selected(&s_dock);
+    for (uint8_t i = 0; i < s_dock.count; i += 1) {
+        pet_icon_t icon = s_dock.icons[i];
+        lv_obj_t *box = s_dock_w[icon].box;
+        lv_obj_t *img = s_dock_w[icon].img;
+        if (box == NULL || img == NULL) {
+            continue;
+        }
+        bool selected = (icon == sel);
+        if (selected) {
+            lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+            border(box, COL_SEL, 2);
+            lv_image_set_src(img, pet_ui_dock_dsc(icon, true));
+            lv_obj_set_pos(img, slot_center(i) - 12, DOCK_IMG_Y_SEL);
+        } else {
+            lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(box, 0, 0);
+            lv_image_set_src(img, pet_ui_dock_dsc(icon, false));
+            lv_obj_set_pos(img, slot_center(i) - 10, DOCK_IMG_Y);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 弹层：通用列表（喂食 / 设置）、状态分页、G1 游戏
+// ---------------------------------------------------------------------------
+
+static void modal_open(void)
+{
+    // 全屏弹层盖住房间：停掉宠物身上的持续动画，弹层期间不产生无谓失效。
+    lv_anim_delete(s_creature, NULL);
+    show(s_modal);
+    lv_obj_move_foreground(s_modal);
+}
+
+static void modal_close(void)
+{
+    hide(s_modal);
+    lv_obj_clean(s_modal_body);
+    s_mode = MODE_ROOM;
+    if (s_snap.stage == PT_STAGE_EGG) {
+        egg_idle_anim();
+    }
+}
+
+static void list_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    memset(s_list_row, 0, sizeof(s_list_row));
+
+    const char *title;
+    uint8_t count = 0;
+    const char *rows[6] = { 0 };
+
+    if (s_list_kind == LIST_FOOD) {
+        title = "FOOD";
+        if (s_snap.stage == PT_STAGE_BABY) {
+            rows[count++] = "Bottle";
+        } else {
+            rows[count++] = "Meal";
+            rows[count++] = "Snack";
+        }
+    } else {
+        title = "SOUND";
+        rows[0] = "Mute";
+        rows[1] = "Low";
+        rows[2] = "Mid";
+        rows[3] = "High";
+        rows[4] = "Quiet: ON";
+        rows[5] = "Quiet: OFF";
+        count = 6;
+        s_list_sel = pet_app_volume();
+    }
+    s_list_count = count;
+
+    lv_label_set_text(s_modal_title, title);
+    for (uint8_t i = 0; i < count; i += 1) {
+        // 紧凑行：6 行（设置页）也要落进 188px 弹层主体。
+        lv_obj_t *row = rect(s_modal_body, 4, 4 + (int32_t) i * 28, 184, 25, 8,
+                             COL_PANEL);
+        label(row, 0, 3, 184, &lv_font_montserrat_14, COL_INK, rows[i]);
+        s_list_row[i] = row;
+    }
+    if (s_list_sel >= s_list_count) {
+        s_list_sel = 0;
+    }
+    for (int i = 0; i < s_list_count; i += 1) {
+        bool marked = (i == s_list_sel);
+        // 设置页同时标出当前免打扰档（音量选中框之外的第二处当前值）。
+        if (s_list_kind == LIST_SETTINGS
+            && ((pet_app_quiet() && i == 4) || (!pet_app_quiet() && i == 5))) {
+            marked = true;
+        }
+        if (marked) {
+            border(s_list_row[i], COL_SEL, 3);
+        } else {
+            lv_obj_set_style_border_width(s_list_row[i], 0, 0);
+        }
+    }
+}
+
+static void status_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    char buf[48];
+
+    if (s_status_page == 0) {
+        lv_label_set_text(s_modal_title, "OVERVIEW  1/3");
+        snprintf(buf, sizeof(buf), "%s  %s", stage_name(s_snap.stage),
+                 species_name(s_snap.species));
+        label(s_modal_body, 4, 8, 168, &lv_font_montserrat_20, COL_INK, buf);
+        snprintf(buf, sizeof(buf), "Age: %d d", (int) s_snap.age_days);
+        label(s_modal_body, 4, 38, 168, &lv_font_montserrat_14, COL_INK, buf);
+        snprintf(buf, sizeof(buf), "Weight: %d", (int) s_snap.weight);
+        label(s_modal_body, 4, 66, 168, &lv_font_montserrat_14, COL_INK, buf);
+        snprintf(buf, sizeof(buf), "Bond: %d", (int) s_snap.bond);
+        label(s_modal_body, 4, 94, 168, &lv_font_montserrat_14, COL_INK, buf);
+        snprintf(buf, sizeof(buf), "Coins: %lu G",
+                 (unsigned long) s_esnap.coins);
+        label(s_modal_body, 4, 122, 168, &lv_font_montserrat_14, COL_YELLOW,
+              buf);
+        snprintf(buf, sizeof(buf), "Shells: %d", (int) s_esnap.shells);
+        label(s_modal_body, 4, 150, 168, &lv_font_montserrat_14, COL_BLUE,
+              buf);
+        // P2-S1：性格成年才揭晓（04 §7：保留观察乐趣）；成年生病时让位给提示行。
+        if (s_snap.stage >= PT_STAGE_ADULT && !s_snap.sick) {
+            snprintf(buf, sizeof(buf), "Trait: %s",
+                     pt_personality_name(
+                         (pt_personality_t) s_snap.genome.personality));
+            label(s_modal_body, 4, 172, 168, &lv_font_montserrat_14, COL_INK,
+                  buf);
+        }
+        if (s_snap.sick) {
+            label(s_modal_body, 4, 172, 168, &lv_font_montserrat_14, COL_RED,
+                  "Sick now");
+        }
+    } else if (s_status_page == 1) {
+        lv_label_set_text(s_modal_title, "METERS  2/3");
+        struct {
+            const char *name;
+            uint8_t value;
+            uint32_t color;
+        } meters[4] = {
+            { "Food", s_snap.fullness, COL_GREEN },
+            { "Fun", s_snap.happiness, COL_YELLOW },
+            { "Health", s_snap.health, COL_RED },
+            { "Energy", s_snap.energy, COL_BLUE },
+        };
+        for (int i = 0; i < 4; i += 1) {
+            int32_t y = 10 + i * 38;
+            label(s_modal_body, 2, y + 6, 44, &lv_font_montserrat_14, COL_INK,
+                  meters[i].name);
+            rect(s_modal_body, 50, y + 4, 100, 18, 9, COL_PIP_OFF);
+            int32_t fw = (int32_t) meters[i].value;   // 0..100 → 100px
+            lv_obj_t *fill = rect(s_modal_body, 50, y + 4, fw, 18, 9,
+                                  meters[i].color);
+            (void) fill;
+            snprintf(buf, sizeof(buf), "%d", (int) meters[i].value);
+            label(s_modal_body, 152, y + 6, 20, &lv_font_montserrat_14, COL_INK,
+                  buf);
+        }
+    } else {
+        lv_label_set_text(s_modal_title, "CARE  3/3");
+        snprintf(buf, sizeof(buf), "Small miss: %d", (int) s_snap.ledger.small);
+        label(s_modal_body, 4, 4, 168, &lv_font_montserrat_14, COL_INK, buf);
+        snprintf(buf, sizeof(buf), "Big miss: %d", (int) s_snap.ledger.big);
+        label(s_modal_body, 4, 24, 168, &lv_font_montserrat_14, COL_INK, buf);
+        snprintf(buf, sizeof(buf), "Full top-ups: %d",
+                 (int) s_snap.ledger.full_topups);
+        label(s_modal_body, 4, 44, 168, &lv_font_montserrat_14, COL_INK, buf);
+        snprintf(buf, sizeof(buf), "Fun top-ups: %d",
+                 (int) s_snap.ledger.happy_topups);
+        label(s_modal_body, 4, 64, 168, &lv_font_montserrat_14, COL_INK, buf);
+        snprintf(buf, sizeof(buf), "Snubs: %d",
+                 (int) s_snap.ledger.perfunctory);
+        label(s_modal_body, 4, 84, 168, &lv_font_montserrat_14, COL_INK, buf);
+
+        // 维度②技能（0–99）：MIND / BODY / ART。
+        struct {
+            const char *name;
+            uint8_t value;
+        } skills[PT_SKILL_COUNT] = {
+            { "Mind", s_snap.skill[PT_SKILL_MIND] },
+            { "Body", s_snap.skill[PT_SKILL_BODY] },
+            { "Art", s_snap.skill[PT_SKILL_ART] },
+        };
+        for (int i = 0; i < PT_SKILL_COUNT; i += 1) {
+            int32_t y = 112 + i * 20;
+            label(s_modal_body, 2, y, 44, &lv_font_montserrat_14, COL_INK,
+                  skills[i].name);
+            rect(s_modal_body, 50, y - 2, 100, 14, 7, COL_PIP_OFF);
+            rect(s_modal_body, 50, y - 2, skills[i].value, 14, 7, COL_BLUE);
+            snprintf(buf, sizeof(buf), "%d", (int) skills[i].value);
+            label(s_modal_body, 152, y, 20, &lv_font_montserrat_14, COL_INK,
+                  buf);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 商店 / 背包 / 每日签到（P1 经济）
+// ---------------------------------------------------------------------------
+
+enum {
+    SHOP_ROW_ITEM = 0,
+    SHOP_ROW_MORE,
+    SHOP_ROW_TAB,
+    SHOP_ROW_BONUS,
+    SHOP_ROW_STYLE,
+};
+
+static void style_open(void);
+
+static void shop_mark_rows(void)
+{
+    for (uint8_t i = 0; i < s_shop_rows; i += 1) {
+        if (i == s_shop_sel) {
+            border(s_list_row[i], COL_SEL, 3);
+        } else {
+            lv_obj_set_style_border_width(s_list_row[i], 0, 0);
+        }
+    }
+}
+
+// 把当前页（s_shop_page）铺成行：签到格、物品格、More、Shop/Bag 切换，最多 6 行。
+static void shop_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    memset(s_list_row, 0, sizeof(s_list_row));
+    s_shop_rows = 0;
+
+    uint16_t items[PT_ECON_INV_SLOTS];
+    uint8_t total = 0;
+    bool bonus = false;
+
+    if (!s_shop_bag) {
+        total = pt_econ_shop_build(&s_esnap, s_snap.stage, s_snap.minute,
+                                   items, (uint8_t) (sizeof(items)
+                                                     / sizeof(items[0])));
+        bonus = s_shop_page == 0
+                && pt_econ_can_checkin(&s_esnap, s_snap.day_id);
+    } else {
+        for (uint8_t i = 0; i < PT_ECON_INV_SLOTS; i += 1) {
+            if (s_esnap.inv[i].qty > 0 && s_esnap.inv[i].item != PT_ITEM_NONE) {
+                items[total++] = s_esnap.inv[i].item;
+            }
+        }
+    }
+
+    // 变页宽分页：除 Shop/Bag 页签外可用 5 行；首页签到再占 1；少年起 Style 占 1；
+    // 放不下时再留 More。
+    if (s_shop_page > 0 && total == 0) {
+        s_shop_page = 0;   // 防御：背包空时不允许停在不存在的页
+    }
+    bool style_open = s_snap.stage >= PT_STAGE_TEEN;
+    uint8_t page = 0;
+    uint8_t pos = 0;
+    for (;;) {
+        uint8_t fixed = (uint8_t) (1 + (style_open ? 1 : 0));
+        uint8_t budget = (uint8_t) (5 - fixed);
+        bool page_bonus = (page == 0 && bonus);
+        if (page_bonus) {
+            budget = (uint8_t) (budget - 1);
+        }
+        uint8_t remaining = (uint8_t) (total - pos);
+        bool has_more = remaining > budget;
+        uint8_t take = has_more ? (uint8_t) (budget - 1) : remaining;
+
+        if (page == s_shop_page) {
+            char buf[28];
+            uint8_t row = 0;
+            if (page_bonus) {
+                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
+                                   184, 25, 8, COL_YELLOW);
+                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_DIM,
+                      "Daily bonus 20G");
+                s_list_row[row] = r;
+                s_shop_row_kind[row] = SHOP_ROW_BONUS;
+                s_shop_row_item[row] = PT_ITEM_NONE;
+                row += 1;
+            }
+            for (uint8_t i = 0; i < take; i += 1) {
+                uint16_t id = items[pos + i];
+                const pt_item_def_t *d = pt_item_def((pt_item_t) id);
+                if (d == NULL) {
+                    continue;
+                }
+                if (!s_shop_bag) {
+                    bool owned = d->kind == PT_ITEM_KIND_TOY
+                                 && pt_econ_count(&s_esnap, (pt_item_t) id) > 0;
+                    if (owned) {
+                        snprintf(buf, sizeof(buf), "%s (owned)", d->name);
+                    } else {
+                        // S5：折扣日显示折后价（食物/玩具仅全场 8 折）。
+                        uint32_t now = pt_econ_item_price_now(d->price,
+                                                              s_snap.day_id);
+                        snprintf(buf, sizeof(buf), "%s  %luG", d->name,
+                                 (unsigned long) now);
+                    }
+                } else if (d->kind == PT_ITEM_KIND_TOY) {
+                    uint8_t left = (uint8_t) (PT_ECON_TOY_USES_DAY
+                                              - s_esnap.toy_uses[id]);
+                    snprintf(buf, sizeof(buf), "%s  play (%d)", d->name,
+                             (int) left);
+                } else {
+                    snprintf(buf, sizeof(buf), "%s  x%d", d->name,
+                             (int) pt_econ_count(&s_esnap, (pt_item_t) id));
+                }
+                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
+                                   184, 25, 8, COL_PANEL);
+                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_INK, buf);
+                s_list_row[row] = r;
+                s_shop_row_kind[row] = SHOP_ROW_ITEM;
+                s_shop_row_item[row] = id;
+                row += 1;
+            }
+            if (has_more) {
+                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
+                                   184, 25, 8, COL_PANEL);
+                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_BLUE,
+                      "More >>");
+                s_list_row[row] = r;
+                s_shop_row_kind[row] = SHOP_ROW_MORE;
+                s_shop_row_item[row] = PT_ITEM_NONE;
+                row += 1;
+            }
+            if (style_open) {
+                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
+                                   184, 25, 8, COL_GREEN);
+                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_PANEL,
+                      "Style >>");
+                s_list_row[row] = r;
+                s_shop_row_kind[row] = SHOP_ROW_STYLE;
+                s_shop_row_item[row] = PT_ITEM_NONE;
+                row += 1;
+            }
+            lv_obj_t *tab = rect(s_modal_body, 4, 4 + (int32_t) row * 28, 184,
+                                 25, 8, COL_DOCK_BG);
+            label(tab, 0, 3, 184, &lv_font_montserrat_14, COL_INK,
+                  s_shop_bag ? "<< Shop" : "Bag >>");
+            s_list_row[row] = tab;
+            s_shop_row_kind[row] = SHOP_ROW_TAB;
+            s_shop_row_item[row] = PT_ITEM_NONE;
+            row += 1;
+            s_shop_rows = row;
+            break;
+        }
+        pos = (uint8_t) (pos + take);
+        page += 1;
+    }
+
+    if (s_shop_sel >= s_shop_rows) {
+        s_shop_sel = (uint8_t) (s_shop_rows - 1);
+    }
+
+    char title[24];
+    snprintf(title, sizeof(title), "%s  %luG", s_shop_bag ? "BAG" : "SHOP",
+             (unsigned long) s_esnap.coins);
+    lv_label_set_text(s_modal_title, title);
+    shop_mark_rows();
+}
+
+static void shop_open(void)
+{
+    s_shop_bag = false;
+    s_shop_page = 0;
+    s_shop_sel = 0;
+    s_shop_dirty = false;
+    s_mode = MODE_SHOP;
+    modal_open();
+    shop_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
+static void shop_buy_msg(pt_econ_rv_t rv)
+{
+    switch (rv) {
+    case PT_ECON_NO_MONEY: set_msg("Not enough G", 1100); break;
+    case PT_ECON_OWNED: set_msg("Already owned", 1100); break;
+    case PT_ECON_LOCKED: set_msg("Locked", 1100); break;
+    case PT_ECON_NOT_ON_SHELF: set_msg("Not on shelf", 1100); break;
+    default: set_msg("Can't buy", 1000); break;
+    }
+}
+
+static void shop_activate_row(void)
+{
+    uint8_t kind = s_shop_row_kind[s_shop_sel];
+    uint16_t id16 = s_shop_row_item[s_shop_sel];
+    pt_item_t item = (pt_item_t) id16;
+
+    if (kind == SHOP_ROW_STYLE) {
+        style_open();
+        return;
+    }
+    if (kind == SHOP_ROW_TAB) {
+        s_shop_bag = !s_shop_bag;
+        s_shop_page = 0;
+        s_shop_sel = 0;
+        shop_build();
+        pet_audio_play(SND_CONFIRM);
+        return;
+    }
+    if (kind == SHOP_ROW_MORE) {
+        s_shop_page += 1;
+        s_shop_sel = 0;
+        shop_build();
+        pet_audio_play(SND_CONFIRM);
+        return;
+    }
+    if (kind == SHOP_ROW_BONUS) {
+        pet_app_econ_checkin();
+        set_msg("20G  thank you!", 1200);
+        s_shop_dirty = true;
+        return;
+    }
+
+    if (!s_shop_bag) {
+        // 对快照副本做一次"试买"：失败给准确提示且绝不二次扣款。
+        pt_econ_t trial = s_esnap;
+        pt_econ_rv_t rv = pt_econ_buy(&trial, s_snap.stage, s_snap.minute,
+                                      item);
+        if (rv != PT_ECON_OK) {
+            shop_buy_msg(rv);
+            pet_audio_play(SND_CANCEL);
+            return;
+        }
+        pet_app_econ_buy(item);
+        s_shop_dirty = true;
+        set_msg("Bought!", 800);
+        return;
+    }
+
+    const pt_item_def_t *d = pt_item_def(item);
+    if (d != NULL && d->kind == PT_ITEM_KIND_TOY) {
+        pt_econ_t trial = s_esnap;
+        pt_econ_rv_t rv = pt_econ_use_toy(&trial, item);
+        if (rv != PT_ECON_OK) {
+            set_msg(rv == PT_ECON_USES_EXHAUSTED ? "Played out today"
+                                                 : "Can't play", 1100);
+            pet_audio_play(SND_CANCEL);
+            return;
+        }
+        pet_app_econ_play(item);
+        s_shop_dirty = true;
+        set_msg("Fun!", 800);
+        return;
+    }
+
+    pt_econ_t trial = s_esnap;
+    if (pt_econ_take_food(&trial, item) != PT_ECON_OK) {
+        set_msg("No stock", 1000);
+        pet_audio_play(SND_CANCEL);
+        return;
+    }
+    pet_app_econ_eat(item);
+    pet_audio_play(SND_EAT);
+    s_mood = MOOD_EAT;
+    s_mood_until = now_ms() + 800;
+    modal_close();
+}
+
+static void handle_shop_key(pet_ui_action_t act)
+{
+    if (act == PET_UI_ACT_PREV) {
+        s_shop_sel = (uint8_t) ((s_shop_sel + s_shop_rows - 1) % s_shop_rows);
+        shop_mark_rows();
+    } else if (act == PET_UI_ACT_NEXT) {
+        s_shop_sel = (uint8_t) ((s_shop_sel + 1) % s_shop_rows);
+        shop_mark_rows();
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        shop_activate_row();
+    } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        pet_audio_play(SND_CANCEL);
+        modal_close();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Style 弹层：服装 / 功能家具 / 房间主题（S4，designs 05 §7）
+// ---------------------------------------------------------------------------
+
+enum {
+    DEC_ROW_ITEM = 0,
+    DEC_ROW_MORE,
+    DEC_ROW_TAB,
+};
+
+static const char *const DEC_TAB_NAME[3] = { "Wear", "Room", "Theme" };
+
+static const char *outfit_slot_tag(pt_slot_t slot)
+{
+    switch (slot) {
+    case PT_SLOT_HAT: return "Hat ";
+    case PT_SLOT_FACE: return "Face";
+    case PT_SLOT_COLLAR: return "Neck";
+    case PT_SLOT_HELD: return "Hand";
+    default: return "?";
+    }
+}
+
+static void style_mark_rows(void)
+{
+    for (uint8_t i = 0; i < s_dec_rows; i += 1) {
+        if (i == s_dec_sel) {
+            border(s_list_row[i], COL_SEL, 3);
+        } else {
+            lv_obj_set_style_border_width(s_list_row[i], 0, 0);
+        }
+    }
+}
+
+static uint8_t style_tab_count(void)
+{
+    if (s_dec_tab == 0) {
+        return (uint8_t) (PT_OUTFIT_COUNT - 1);
+    }
+    if (s_dec_tab == 1) {
+        return (uint8_t) PT_FURN_COUNT;
+    }
+    return (uint8_t) PT_THEME_COUNT;
+}
+
+// 三个页签统一分页：每行 28px，底部 1 行页签；超出用 More，最多 6 行。
+static void style_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    memset(s_list_row, 0, sizeof(s_list_row));
+    s_dec_rows = 0;
+
+    uint8_t total = style_tab_count();
+    uint8_t budget = 5;
+    uint8_t pos = 0;
+    for (uint8_t pg = 0;; pg += 1) {
+        uint8_t remaining = (uint8_t) (total - pos);
+        bool has_more = remaining > budget;
+        uint8_t take = has_more ? (uint8_t) (budget - 1) : remaining;
+        if (pg == s_dec_page) {
+            char buf[30];
+            uint8_t row = 0;
+            for (uint8_t i = 0; i < take; i += 1) {
+                uint8_t id = (uint8_t) (pos + i);
+                uint32_t col = COL_INK;
+                if (s_dec_tab == 0) {
+                    pt_outfit_t oid = (pt_outfit_t) (id + 1);
+                    const pt_outfit_def_t *od = pt_outfit_def(oid);
+                    bool owned = pt_decor_owns_outfit(&s_dsnap, oid);
+                    bool worn = pt_decor_worn(&s_dsnap, od->slot) == oid;
+                    if (worn) {
+                        snprintf(buf, sizeof(buf), "%s %s  [%s]",
+                                 outfit_slot_tag(od->slot), od->name, "ON");
+                        col = COL_GREEN;
+                    } else if (owned) {
+                        snprintf(buf, sizeof(buf), "%s %s  Wear",
+                                 outfit_slot_tag(od->slot), od->name);
+                        col = COL_BLUE;
+                    } else if (od->shells > 0) {
+                        snprintf(buf, sizeof(buf), "%s %s  %dS",
+                                 outfit_slot_tag(od->slot), od->name,
+                                 (int) od->shells);
+                    } else {
+                        snprintf(buf, sizeof(buf), "%s %s  %luG",
+                                 outfit_slot_tag(od->slot), od->name,
+                                 (unsigned long) pt_decor_outfit_price_g(
+                                     od, s_snap.day_id));
+                    }
+                } else if (s_dec_tab == 1) {
+                    const pt_furn_def_t *fd = pt_furn_def((pt_furn_t) id);
+                    if (pt_decor_is_placed(&s_dsnap, (pt_furn_t) id)) {
+                        snprintf(buf, sizeof(buf), "%s  [placed]", fd->name);
+                        col = COL_GREEN;
+                    } else if (pt_decor_owns_furn(&s_dsnap, (pt_furn_t) id)) {
+                        snprintf(buf, sizeof(buf), "%s  Place", fd->name);
+                        col = COL_BLUE;
+                    } else {
+                        snprintf(buf, sizeof(buf), "%s  %luG", fd->name,
+                                 (unsigned long) pt_decor_furn_price_g(
+                                     fd, s_snap.day_id));
+                    }
+                } else {
+                    const pt_theme_def_t *td = pt_theme_def((pt_theme_t) id);
+                    if ((pt_theme_t) s_dsnap.theme == (pt_theme_t) id) {
+                        snprintf(buf, sizeof(buf), "%s  [on]", td->name);
+                        col = COL_GREEN;
+                    } else if (pt_decor_owns_theme(&s_dsnap, (pt_theme_t) id)) {
+                        snprintf(buf, sizeof(buf), "%s  Use", td->name);
+                        col = COL_BLUE;
+                    } else if (td->shells > 0) {
+                        snprintf(buf, sizeof(buf), "%s  %dS", td->name,
+                                 (int) td->shells);
+                    } else {
+                        snprintf(buf, sizeof(buf), "%s  %dG", td->name,
+                                 (int) td->price);
+                    }
+                }
+                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
+                                   184, 25, 8, COL_PANEL);
+                label(r, 0, 3, 184, &lv_font_montserrat_14, col, buf);
+                s_list_row[row] = r;
+                s_dec_row_kind[row] = DEC_ROW_ITEM;
+                s_dec_row_id[row] = (uint16_t) id;
+                row += 1;
+            }
+            if (has_more) {
+                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
+                                   184, 25, 8, COL_PANEL);
+                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_BLUE,
+                      "More >>");
+                s_list_row[row] = r;
+                s_dec_row_kind[row] = DEC_ROW_MORE;
+                s_dec_row_id[row] = 0;
+                row += 1;
+            }
+            const char *next_name = DEC_TAB_NAME[(s_dec_tab + 1) % 3];
+            char tabbuf[20];
+            snprintf(tabbuf, sizeof(tabbuf), "%s >>", next_name);
+            lv_obj_t *tab = rect(s_modal_body, 4, 4 + (int32_t) row * 28, 184,
+                                 25, 8, COL_DOCK_BG);
+            label(tab, 0, 3, 184, &lv_font_montserrat_14, COL_INK, tabbuf);
+            s_list_row[row] = tab;
+            s_dec_row_kind[row] = DEC_ROW_TAB;
+            s_dec_row_id[row] = 0;
+            row += 1;
+            s_dec_rows = row;
+            break;
+        }
+        pos = (uint8_t) (pos + take);
+    }
+
+    if (s_dec_sel >= s_dec_rows) {
+        s_dec_sel = (uint8_t) (s_dec_rows - 1);
+    }
+
+    char title[28];
+    snprintf(title, sizeof(title), "STYLE %s %luG %uS",
+             DEC_TAB_NAME[s_dec_tab], (unsigned long) s_esnap.coins,
+             (unsigned) s_esnap.shells);
+    lv_label_set_text(s_modal_title, title);
+    style_mark_rows();
+}
+
+static void style_open(void)
+{
+    s_dec_tab = 0;
+    s_dec_page = 0;
+    s_dec_sel = 0;
+    s_dec_dirty = false;
+    s_mode = MODE_DECOR;
+    modal_open();
+    style_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
+static void decor_buy_msg(pt_decor_rv_t rv, bool shells)
+{
+    switch (rv) {
+    case PT_DECOR_NO_MONEY:
+        set_msg(shells ? "Not enough shells" : "Not enough G", 1100);
+        break;
+    case PT_DECOR_LOCKED: set_msg("Locked", 1100); break;
+    case PT_DECOR_OWNED: set_msg("Already owned", 1100); break;
+    case PT_DECOR_PLACE_CAP: set_msg("3 furniture max", 1100); break;
+    default: set_msg("Can't do that", 1000); break;
+    }
+}
+
+static void style_activate_row(void)
+{
+    uint8_t kind = s_dec_row_kind[s_dec_sel];
+    uint8_t id = (uint8_t) s_dec_row_id[s_dec_sel];
+
+    if (kind == DEC_ROW_TAB) {
+        s_dec_tab = (uint8_t) ((s_dec_tab + 1) % 3);
+        s_dec_page = 0;
+        s_dec_sel = 0;
+        style_build();
+        pet_audio_play(SND_CONFIRM);
+        return;
+    }
+    if (kind == DEC_ROW_MORE) {
+        s_dec_page += 1;
+        s_dec_sel = 0;
+        style_build();
+        pet_audio_play(SND_CONFIRM);
+        return;
+    }
+
+    if (s_dec_tab == 0) {
+        pt_outfit_t oid = (pt_outfit_t) (id + 1);
+        const pt_outfit_def_t *od = pt_outfit_def(oid);
+        if (od == NULL) {
+            return;
+        }
+        if (!pt_decor_owns_outfit(&s_dsnap, oid)) {
+            pt_decor_t dt = s_dsnap;
+            pt_econ_t et = s_esnap;
+            pt_decor_rv_t rv = pt_decor_buy_outfit(&dt, &et, s_snap.stage,
+                                                   s_snap.day_id, oid);
+            if (rv != PT_DECOR_OK) {
+                decor_buy_msg(rv, od->shells > 0);
+                pet_audio_play(SND_CANCEL);
+                return;
+            }
+            // 买下即穿上（再点一次可脱下）。
+            pet_app_decor_buy(0, (uint8_t) oid);
+            pet_app_decor_equip((uint8_t) oid);
+            set_msg("New look!", 900);
+        } else if (pt_decor_worn(&s_dsnap, od->slot) == oid) {
+            pet_app_decor_unequip(od->slot);
+            set_msg("Taken off", 800);
+        } else {
+            pet_app_decor_equip((uint8_t) oid);
+            set_msg("Looking good!", 800);
+        }
+        s_dec_dirty = true;
+        return;
+    }
+
+    if (s_dec_tab == 1) {
+        pt_furn_t fid = (pt_furn_t) id;
+        const pt_furn_def_t *fd = pt_furn_def(fid);
+        if (fd == NULL) {
+            return;
+        }
+        if (pt_decor_is_placed(&s_dsnap, fid)) {
+            pet_app_decor_unplace((uint8_t) fid);
+            set_msg("Put away", 800);
+        } else if (pt_decor_owns_furn(&s_dsnap, fid)) {
+            pt_decor_t dt = s_dsnap;
+            if (pt_decor_place(&dt, fid) != PT_DECOR_OK) {
+                set_msg("3 furniture max", 1100);
+                pet_audio_play(SND_CANCEL);
+                return;
+            }
+            pet_app_decor_place((uint8_t) fid);
+            set_msg("Placed!", 800);
+        } else {
+            pt_decor_t dt = s_dsnap;
+            pt_econ_t et = s_esnap;
+            pt_decor_rv_t rv = pt_decor_buy_furn(&dt, &et, s_snap.stage,
+                                                 s_snap.day_id, fid);
+            if (rv != PT_DECOR_OK) {
+                decor_buy_msg(rv, false);
+                pet_audio_play(SND_CANCEL);
+                return;
+            }
+            pet_app_decor_buy(1, (uint8_t) fid);
+            set_msg("Bought!", 900);
+        }
+        s_dec_dirty = true;
+        return;
+    }
+
+    // 主题页
+    pt_theme_t tid = (pt_theme_t) id;
+    const pt_theme_def_t *td = pt_theme_def(tid);
+    if (td == NULL) {
+        return;
+    }
+    if ((pt_theme_t) s_dsnap.theme == tid) {
+        return;
+    }
+    if (!pt_decor_owns_theme(&s_dsnap, tid)) {
+        pt_decor_t dt = s_dsnap;
+        pt_econ_t et = s_esnap;
+        pt_decor_rv_t rv = pt_decor_buy_theme(&dt, &et, tid);
+        if (rv != PT_DECOR_OK) {
+            decor_buy_msg(rv, td->shells > 0);
+            pet_audio_play(SND_CANCEL);
+            return;
+        }
+        // 买下即启用成套主题。
+        pet_app_decor_buy(2, (uint8_t) tid);
+        pet_app_decor_set_theme((uint8_t) tid);
+        set_msg("Room restyled!", 1000);
+    } else {
+        pet_app_decor_set_theme((uint8_t) tid);
+        set_msg("Restyle!", 800);
+    }
+    s_dec_dirty = true;
+}
+
+static void handle_style_key(pet_ui_action_t act)
+{
+    if (act == PET_UI_ACT_PREV) {
+        s_dec_sel = (uint8_t) ((s_dec_sel + s_dec_rows - 1) % s_dec_rows);
+        style_mark_rows();
+    } else if (act == PET_UI_ACT_NEXT) {
+        s_dec_sel = (uint8_t) ((s_dec_sel + 1) % s_dec_rows);
+        style_mark_rows();
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        style_activate_row();
+    } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        pet_audio_play(SND_CANCEL);
+        shop_open();   // 返回商店/背包弹层
+    }
+}
+
+static void checkin_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    lv_label_set_text(s_modal_title, "DAILY BONUS");
+
+    uint16_t next_day = (uint16_t) (s_esnap.streak + 1);
+    char buf[40];
+    if (next_day >= 7) {
+        label(s_modal_body, 4, 24, 184, &lv_font_montserrat_20, COL_INK,
+              "7-day streak!");
+        label(s_modal_body, 4, 70, 184, &lv_font_montserrat_20, COL_YELLOW,
+              "100 G");
+        label(s_modal_body, 4, 106, 184, &lv_font_montserrat_14, COL_INK,
+              "+ 1 shell ticket");
+    } else {
+        snprintf(buf, sizeof(buf), "Day %d of 7", (int) next_day);
+        label(s_modal_body, 4, 30, 184, &lv_font_montserrat_14, COL_INK, buf);
+        label(s_modal_body, 4, 70, 184, &lv_font_montserrat_20, COL_YELLOW,
+              "20 G");
+    }
+    label(s_modal_body, 4, 150, 184, &lv_font_montserrat_14, COL_DIM,
+          "OK to claim");
+}
+
+static void checkin_open(void)
+{
+    s_mode = MODE_CHECKIN;
+    modal_open();
+    checkin_build();
+}
+
+static void handle_checkin_key(pet_ui_action_t act)
+{
+    if (act == PET_UI_ACT_CONFIRM) {
+        pet_app_econ_checkin();
+        set_msg("20G  thank you!", 1200);
+        pet_audio_play(SND_HAPPY);
+        modal_close();
+    } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        pet_audio_play(SND_CANCEL);
+        modal_close();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P2-S3a 婚介/家庭面板（designs 08 §1–§4）
+// 两级：候选名单 → 某候选的动作（打招呼/送礼/两种戒指示婚）。
+// 已婚/蛋就绪为只读状态页（同住倒计时；蛋在 S3b 接上世代交替）。
+// ---------------------------------------------------------------------------
+
+static pt_social_t s_ssnap;
+static bool s_have_ssnap;
+static int s_mate_level;     // 0=候选列表，1=动作列表，2=家谱
+static int s_mate_sel;       // 当前页选中行
+static int s_mate_ci;        // 动作页对应的候选槽位
+static int8_t s_mate_page;   // 家谱页码
+static int8_t s_mate_tree_from;  // 家谱返回页（0/1=已婚页）
+static lv_obj_t *s_mate_sel_box;
+
+static void mate_mark_selected(void)
+{
+    if (s_mate_sel_box != NULL) {
+        border(s_mate_sel_box, COL_SEL, 3);
+    }
+}
+
+static const char *mate_soc_msg(uint8_t rv)
+{
+    switch ((pt_soc_rv_t) rv) {
+    case PT_SOC_CAPPED:   return "No visits today";
+    case PT_SOC_COOLDOWN: return "Visit again later";
+    case PT_SOC_POOR:     return "Not enough G";
+    case PT_SOC_NOT_LOVE: return "Not in love yet";
+    case PT_SOC_LOCKED:   return "Wait 2 days";
+    case PT_SOC_REJECTED: return "Maybe later...";
+    default:              return "Can't now";
+    }
+}
+
+static void mate_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    s_mate_sel_box = NULL;
+
+    char title[26];
+    snprintf(title, sizeof(title), "FAMILY  %luG",
+             (unsigned long) s_esnap.coins);
+    lv_label_set_text(s_modal_title, title);
+
+    // 家谱页（S3b）：只读，UP/DOWN 翻页，OK/BACK 返回。
+    if (s_mate_level == 2) {
+        uint8_t hc = pt_social_hall_count(&s_ssnap);
+        char head[28];
+        uint8_t pages = (uint8_t) ((hc + 2) / 3);
+        if (pages == 0) {
+            pages = 1;
+        }
+        if (s_mate_page >= pages) {
+            s_mate_page = (int8_t) (pages - 1);
+        }
+        snprintf(head, sizeof(head), "FAMILY TREE %d/%d",
+                 (int) s_mate_page + 1, (int) pages);
+        label(s_modal_body, 0, 2, 192, &lv_font_montserrat_14, COL_DIM, head);
+        for (uint8_t k = 0; k < 3; k += 1) {
+            // 最新一代在前：hall 为 FIFO。
+            int idx = (int) hc - 1 - (s_mate_page * 3 + k);
+            if (idx < 0) {
+                break;
+            }
+            const pt_soc_hall_t *h = pt_social_hall_entry(&s_ssnap,
+                                                           (uint8_t) idx);
+            int y = 20 + k * 46;
+            lv_obj_t *box = rect(s_modal_body, 0, y, 192, 42, 8, COL_PANEL);
+            char pn[8], mn[8];
+            pt_social_name(&h->pet, pn, sizeof(pn));
+            static const char *const CAREW[4] = {
+                "Perfect", "Great", "Normal", "Neglect"
+            };
+            const char *cw = (h->care < 4) ? CAREW[h->care] : "Normal";
+            char line[40];
+            snprintf(line, sizeof(line), "G%lu %s",
+                     (unsigned long) h->generation, pn);
+            label(box, 6, 2, 90, &lv_font_montserrat_14, COL_INK, line);
+            snprintf(line, sizeof(line), "%s",
+                     species_name((pt_species_t) h->species));
+            label(box, 92, 2, 94, &lv_font_montserrat_14, COL_BLUE, line);
+            bool mated = false;
+            for (uint8_t b = 0; b < 8; b += 1) {
+                const uint8_t *raw = (const uint8_t *) &h->mate;
+                if (raw[b] != 0) { mated = true; break; }
+            }
+            if (mated) {
+                pt_social_name(&h->mate, mn, sizeof(mn));
+                snprintf(line, sizeof(line), "Care %s  +%s", cw, mn);
+            } else {
+                snprintf(line, sizeof(line), "Care %s", cw);
+            }
+            label(box, 6, 21, 180, &lv_font_montserrat_14, COL_DIM, line);
+        }
+        lv_obj_t *back = rect(s_modal_body, 56, 160, 80, 24, 8, COL_DOCK_BG);
+        label(back, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Back");
+        s_mate_sel_box = back;
+        mate_mark_selected();
+        return;
+    }
+
+    if (s_ssnap.phase == PT_SOC_MARRIED
+        || s_ssnap.phase == PT_SOC_EGG_READY) {
+        char nm[8];
+        pt_social_name(&s_ssnap.spouse, nm, sizeof(nm));
+        label(s_modal_body, 0, 26, 192, &lv_font_montserrat_20, COL_INK,
+              "Married");
+        char line[32];
+        snprintf(line, sizeof(line), "to %s", nm);
+        label(s_modal_body, 0, 56, 192, &lv_font_montserrat_14, COL_DIM, line);
+        if (s_ssnap.phase == PT_SOC_EGG_READY) {
+            label(s_modal_body, 0, 86, 192, &lv_font_montserrat_14, COL_RED,
+                  "An egg is on the way!");
+        } else {
+            int32_t left = pt_social_egg_minutes_left(&s_ssnap, s_snap.minute);
+            if (left > 0) {
+                snprintf(line, sizeof(line), "Egg in %ldh %ldm",
+                         (long) (left / 60), (long) (left % 60));
+                label(s_modal_body, 0, 86, 192, &lv_font_montserrat_14,
+                      COL_GREEN, line);
+            }
+        }
+        // 行：迎接新蛋（仅蛋就绪）/家谱（有名人堂条目）/返回。
+        uint8_t rows = 0;
+        bool has_tree = pt_social_hall_count(&s_ssnap) > 0;
+        int8_t egg_row = -1, tree_row = -1, back_row = -1;
+        int y = 118;
+        if (s_ssnap.phase == PT_SOC_EGG_READY) {
+            egg_row = (int8_t) rows;
+            lv_obj_t *b = rect(s_modal_body, 16, y, 160, 24, 8, COL_GREEN);
+            label(b, 0, 3, 160, &lv_font_montserrat_14, COL_PANEL,
+                  "Welcome the egg!");
+            if (s_mate_sel == rows) { s_mate_sel_box = b; }
+            rows += 1;
+            y += 26;
+        }
+        if (has_tree) {
+            tree_row = (int8_t) rows;
+            lv_obj_t *b = rect(s_modal_body, 16, y, 160, 24, 8, COL_PANEL);
+            label(b, 0, 3, 160, &lv_font_montserrat_14, COL_INK, "Family Tree");
+            if (s_mate_sel == rows) { s_mate_sel_box = b; }
+            rows += 1;
+            y += 26;
+        }
+        back_row = (int8_t) rows;
+        lv_obj_t *back = rect(s_modal_body, 56, y, 80, 24, 8, COL_DOCK_BG);
+        label(back, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Back");
+        if (s_mate_sel == rows) { s_mate_sel_box = back; }
+        rows += 1;
+        (void) egg_row; (void) tree_row; (void) back_row;
+        if (s_mate_sel >= rows) { s_mate_sel = 0; }
+        mate_mark_selected();
+        return;
+    }
+
+    if (s_mate_level == 0) {
+        label(s_modal_body, 0, 2, 192, &lv_font_montserrat_14, COL_DIM,
+              "Today's visitors");
+        uint8_t slots[PT_SOC_CANDIDATES];
+        uint8_t n = 0;
+        for (uint8_t i = 0; i < PT_SOC_CANDIDATES; i += 1) {
+            if (s_ssnap.cand[i].valid) {
+                slots[n++] = i;
+            }
+        }
+        if (n == 0) {
+            label(s_modal_body, 0, 60, 192, &lv_font_montserrat_14, COL_DIM,
+                  "Nobody yet");
+            label(s_modal_body, 0, 84, 192, &lv_font_montserrat_14, COL_DIM,
+                  "Matchmaker visits mornings");
+        }
+        int row = 0;
+        for (uint8_t k = 0; k < n; k += 1) {
+            const pt_soc_cand_t *c = &s_ssnap.cand[slots[k]];
+            int y = 24 + k * 46;
+            lv_obj_t *box = rect(s_modal_body, 0, y, 192, 42, 8, COL_PANEL);
+            char nm[8];
+            pt_social_name(&c->genome, nm, sizeof(nm));
+            char line[40];
+            snprintf(line, sizeof(line), "%s - %s", nm,
+                     pt_personality_name((pt_personality_t)
+                                         c->genome.personality));
+            label(box, 6, 3, 180, &lv_font_montserrat_14, COL_INK, line);
+            snprintf(line, sizeof(line), "%s %d   %d/%d visits",
+                     pt_social_rel_name(pt_social_rel_stage(c->bond)),
+                     (int) c->bond, (int) c->interacts_today,
+                     PT_CFG_SOC_INTERACT_DAY_CAP);
+            label(box, 6, 22, 180, &lv_font_montserrat_14, COL_BLUE, line);
+            if (s_mate_sel == row) {
+                s_mate_sel_box = box;
+            }
+            row += 1;
+        }
+        bool has_tree = pt_social_hall_count(&s_ssnap) > 0;
+        int by = 24 + n * 46;
+        if (has_tree) {
+            lv_obj_t *tb = rect(s_modal_body, 16, by, 160, 24, 8, COL_PANEL);
+            label(tb, 0, 3, 160, &lv_font_montserrat_14, COL_INK,
+                  "Family Tree");
+            if (s_mate_sel == row) {
+                s_mate_sel_box = tb;
+            }
+            row += 1;
+            by += 26;
+        }
+        lv_obj_t *back = rect(s_modal_body, 56, by, 80, 26, 8,
+                              COL_DOCK_BG);
+        label(back, 0, 4, 80, &lv_font_montserrat_14, COL_INK, "Back");
+        if (s_mate_sel == row) {
+            s_mate_sel_box = back;
+        }
+        if (s_mate_sel > row) {
+            s_mate_sel = 0;
+        }
+        mate_mark_selected();
+        return;
+    }
+
+    // 动作页
+    const pt_soc_cand_t *c =
+        (s_mate_ci < PT_SOC_CANDIDATES && s_ssnap.cand[s_mate_ci].valid)
+        ? &s_ssnap.cand[s_mate_ci] : NULL;
+    if (c == NULL) {
+        s_mate_level = 0;
+        s_mate_sel = 0;
+        mate_build();
+        return;
+    }
+    char nm[8];
+    pt_social_name(&c->genome, nm, sizeof(nm));
+    char head[40];
+    snprintf(head, sizeof(head), "%s - %s", nm,
+             pt_personality_name((pt_personality_t) c->genome.personality));
+    label(s_modal_body, 0, 0, 192, &lv_font_montserrat_14, COL_INK, head);
+    snprintf(head, sizeof(head), "%s %d",
+             pt_social_rel_name(pt_social_rel_stage(c->bond)), (int) c->bond);
+    label(s_modal_body, 0, 19, 192, &lv_font_montserrat_14, COL_BLUE, head);
+    // 好感条
+    rect(s_modal_body, 4, 40, 184, 6, 3, COL_PIP_OFF);
+    int32_t fw = (int32_t) c->bond * 184 / 100;
+    if (fw > 0) {
+        rect(s_modal_body, 4, 40, fw, 6, 3, COL_GREEN);
+    }
+    static const char *const ACT[5] = {
+        "Greet", "Gift 80G", "Propose 500G", "Propose 5000G", "Back",
+    };
+    for (int i = 0; i < 5; i += 1) {
+        int y = 56 + i * 26;
+        lv_obj_t *box = rect(s_modal_body, 16, y, 160, 24, 8, COL_PANEL);
+        uint32_t col = (i == 2) ? COL_BLUE : (i == 3 ? COL_YELLOW : COL_INK);
+        label(box, 0, 3, 160, &lv_font_montserrat_14, col, ACT[i]);
+        if (s_mate_sel == i) {
+            s_mate_sel_box = box;
+        }
+    }
+    mate_mark_selected();
+}
+
+static uint8_t mate_level0_rows(void)
+{
+    return (uint8_t) (pt_social_candidate_count(&s_ssnap)
+                      + (pt_social_hall_count(&s_ssnap) > 0 ? 1 : 0) + 1);
+}
+
+// 已婚/蛋就绪页行数：迎接新蛋（蛋就绪）+ 家谱 + Back。
+static uint8_t mate_married_rows(void)
+{
+    return (uint8_t) ((s_ssnap.phase == PT_SOC_EGG_READY ? 1 : 0)
+                      + (pt_social_hall_count(&s_ssnap) > 0 ? 1 : 0) + 1);
+}
+
+static void mate_open_tree(int8_t from_level)
+{
+    s_mate_tree_from = (int8_t) from_level;
+    s_mate_level = 2;
+    s_mate_page = 0;
+    s_mate_sel = 0;
+    mate_build();
+}
+
+static void mate_open(void)
+{
+    if (!pet_app_social_snapshot(&s_ssnap)) {
+        set_msg("Busy", 800);
+        return;
+    }
+    s_have_ssnap = true;
+    s_mate_level = 0;
+    s_mate_sel = 0;
+    s_mate_ci = 0;
+    s_mate_page = 0;
+    s_mode = MODE_MATE;
+    modal_open();
+    mate_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
+static void handle_mate_key(pet_ui_action_t act)
+{
+    // 家谱页：UP/DOWN 翻页，确认/返回回到来源页。
+    if (s_mate_level == 2) {
+        if (act == PET_UI_ACT_PREV || act == PET_UI_ACT_NEXT) {
+            uint8_t hc = pt_social_hall_count(&s_ssnap);
+            uint8_t pages = (uint8_t) ((hc + 2) / 3);
+            if (pages == 0) {
+                pages = 1;
+            }
+            if (act == PET_UI_ACT_PREV) {
+                s_mate_page = (int8_t) ((s_mate_page + pages - 1) % pages);
+            } else {
+                s_mate_page = (int8_t) ((s_mate_page + 1) % pages);
+            }
+            mate_build();
+        } else if (act == PET_UI_ACT_CONFIRM || act == PET_UI_ACT_BACK
+                   || act == PET_UI_ACT_MENU) {
+            s_mate_level = s_mate_tree_from;
+            s_mate_sel = 0;
+            mate_build();
+            pet_audio_play(SND_CANCEL);
+        }
+        return;
+    }
+
+    if (s_ssnap.phase == PT_SOC_MARRIED
+        || s_ssnap.phase == PT_SOC_EGG_READY) {
+        uint8_t rows = mate_married_rows();
+        bool egg = s_ssnap.phase == PT_SOC_EGG_READY;
+        if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+            modal_close();
+            pet_audio_play(SND_CANCEL);
+        } else if (act == PET_UI_ACT_PREV) {
+            s_mate_sel = (s_mate_sel + rows - 1) % rows;
+            mate_build();
+        } else if (act == PET_UI_ACT_NEXT) {
+            s_mate_sel = (s_mate_sel + 1) % rows;
+            mate_build();
+        } else if (act == PET_UI_ACT_CONFIRM) {
+            if (egg && s_mate_sel == 0) {
+                // 世代交替：引擎任务执行，刷新循环见到相位变化即关面板。
+                pet_app_soc_start_egg();
+                pet_audio_play(SND_EVOLVE);
+            } else if (s_mate_sel == rows - 1) {
+                modal_close();
+                pet_audio_play(SND_CANCEL);
+            } else {
+                mate_open_tree(1);
+                pet_audio_play(SND_CONFIRM);
+            }
+        }
+        return;
+    }
+
+    if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        if (s_mate_level == 1) {
+            s_mate_level = 0;
+            s_mate_sel = s_mate_ci;
+            mate_build();
+            pet_audio_play(SND_CANCEL);
+        } else {
+            modal_close();
+            pet_audio_play(SND_CANCEL);
+        }
+        return;
+    }
+
+    if (s_mate_level == 0) {
+        uint8_t n = pt_social_candidate_count(&s_ssnap);
+        bool has_tree = pt_social_hall_count(&s_ssnap) > 0;
+        uint8_t rows = mate_level0_rows();
+        if (act == PET_UI_ACT_PREV) {
+            s_mate_sel = (s_mate_sel + rows - 1) % rows;
+            mate_build();
+        } else if (act == PET_UI_ACT_NEXT) {
+            s_mate_sel = (s_mate_sel + 1) % rows;
+            mate_build();
+        } else if (act == PET_UI_ACT_CONFIRM) {
+            if (s_mate_sel < n) {
+                // 第 k 个有效候选 → 槽位号
+                uint8_t k = 0;
+                for (uint8_t i = 0; i < PT_SOC_CANDIDATES; i += 1) {
+                    if (s_ssnap.cand[i].valid) {
+                        if (k == (uint8_t) s_mate_sel) {
+                            s_mate_ci = i;
+                            break;
+                        }
+                        k += 1;
+                    }
+                }
+                s_mate_level = 1;
+                s_mate_sel = 0;
+                mate_build();
+                pet_audio_play(SND_CONFIRM);
+            } else if (has_tree && s_mate_sel == n) {
+                mate_open_tree(0);
+                pet_audio_play(SND_CONFIRM);
+            } else {
+                modal_close();
+                pet_audio_play(SND_CANCEL);
+            }
+        }
+        return;
+    }
+
+    // 动作页：5 行
+    if (act == PET_UI_ACT_PREV) {
+        s_mate_sel = (s_mate_sel + 4) % 5;
+        mate_build();
+    } else if (act == PET_UI_ACT_NEXT) {
+        s_mate_sel = (s_mate_sel + 1) % 5;
+        mate_build();
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        switch (s_mate_sel) {
+        case 0:
+            pet_app_soc_greet((uint8_t) s_mate_ci);
+            break;
+        case 1:
+            pet_app_soc_gift((uint8_t) s_mate_ci);
+            break;
+        case 2:
+            pet_app_soc_propose((uint8_t) s_mate_ci, 0);
+            break;
+        case 3:
+            pet_app_soc_propose((uint8_t) s_mate_ci, 1);
+            break;
+        default:
+            s_mate_level = 0;
+            s_mate_sel = s_mate_ci;
+            mate_build();
+            pet_audio_play(SND_CANCEL);
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P2-S4 图鉴面板（04 §8.3 物种 / 05 §8 部件与纯血）
+// 三标签：物种卡（3 页）→ 部件浏览器（按槽 64 件）→ 徽章。
+// OK 在页脚按钮间推进/循环标签，BACK 关闭；页面内 UP/DOWN 翻页或移动光标。
+// ---------------------------------------------------------------------------
+
+static pt_dex_t s_dex_snap;
+static int s_dex_tab;        // 0=物种 1=部件 2=徽章
+static int s_dex_page;       // 物种/徽章页
+static int s_dex_cursor;     // 部件全局位索引 0..total-1
+static int s_dex_focus;      // 部件页：0=格子 1=切标签按钮 2=Back
+static lv_obj_t *s_dex_sel_box;
+
+enum { DEX_TAB_SPECIES = 0, DEX_TAB_PARTS, DEX_TAB_BADGES };
+
+static const char *dex_slot_name(pt_gene_slot_t s)
+{
+    switch (s) {
+    case PT_GENE_SLOT_BODY:    return "Body";
+    case PT_GENE_SLOT_EYES:    return "Eyes";
+    case PT_GENE_SLOT_FACE:    return "Face";
+    case PT_GENE_SLOT_HEAD:    return "Head";
+    case PT_GENE_SLOT_PALETTE: return "Color";
+    case PT_GENE_SLOT_BACK:    return "Back";
+    default:                   return "?";
+    }
+}
+
+static const char *dex_rarity_letter(pt_rarity_t r)
+{
+    switch (r) {
+    case PT_RAR_C: return "C";
+    case PT_RAR_U: return "U";
+    case PT_RAR_R: return "R";
+    case PT_RAR_L: return "L";
+    default:       return "?";
+    }
+}
+
+static uint32_t dex_rarity_color(pt_rarity_t r)
+{
+    switch (r) {
+    case PT_RAR_U: return COL_BLUE;
+    case PT_RAR_R: return 0xB06FC9;
+    case PT_RAR_L: return COL_YELLOW;
+    default:       return COL_DIM;
+    }
+}
+
+static const char *dex_locked_hint(pt_species_t sp)
+{
+    switch (sp) {
+    case PT_SP_TEEN_A:        return "Tidy teen (good care)";
+    case PT_SP_TEEN_B:        return "Easygoing teen";
+    case PT_SP_TEEN_C:        return "Scrappy teen, weak care";
+    case PT_SP_ADULT_PERFECT: return "Perfectly raised adult";
+    case PT_SP_ADULT_GREAT:   return "A great-raised adult";
+    case PT_SP_ADULT_NORMAL:  return "An ordinary adult";
+    case PT_SP_ADULT_NEGLECT: return "An adult left neglected";
+    case PT_SP_ADULT_MOON:    return "???";
+    default:                  return "";
+    }
+}
+
+static void dex_mark_selected(void)
+{
+    if (s_dex_sel_box != NULL) {
+        border(s_dex_sel_box, COL_SEL, 3);
+    }
+}
+
+// 全局位索引 → 槽/槽内序号。
+static void dex_locate(int abs_idx, pt_gene_slot_t *slot, uint8_t *index)
+{
+    for (uint8_t s = 0; s < PT_GENE_SLOT_COUNT; s += 1) {
+        uint8_t begin = pt_dex_slot_offset((pt_gene_slot_t) s);
+        uint8_t end = (uint8_t) (begin
+                                 + pt_slot_part_count((pt_gene_slot_t) s));
+        if ((uint8_t) abs_idx >= begin && (uint8_t) abs_idx < end) {
+            *slot = (pt_gene_slot_t) s;
+            *index = (uint8_t) (abs_idx - begin);
+            return;
+        }
+    }
+    *slot = PT_GENE_SLOT_BODY;
+    *index = 0;
+}
+
+static void dex_build_species(void)
+{
+    char title[24];
+    snprintf(title, sizeof(title), "ALBUM  %d/8",
+             (int) pt_dex_species_seen_count(&s_dex_snap));
+    lv_label_set_text(s_modal_title, title);
+
+    const uint8_t pages = 3;
+    if (s_dex_page < 0) { s_dex_page = 0; }
+    if (s_dex_page >= pages) { s_dex_page = pages - 1; }
+    static const char *const CAREW[4] = {
+        "Perfect", "Great", "Normal", "Neglect"
+    };
+    static const uint32_t PIPC[3] = { COL_BLUE, COL_GREEN, COL_YELLOW };
+
+    for (uint8_t k = 0; k < 3; k += 1) {
+        uint8_t ri = (uint8_t) (s_dex_page * 3 + k);
+        int y = 20 + k * 46;
+        if (ri >= PT_DEX_SPECIES) {
+            break;
+        }
+        pt_species_t sp = pt_dex_roster(ri);
+        uint8_t lv = pt_dex_species_level(&s_dex_snap, sp);
+        lv_obj_t *box = rect(s_modal_body, 0, y, 192, 42, 8, COL_PANEL);
+
+        // 物种色牌（未发现：灰底问号剪影）。
+        const profile_t *p = profile_for(ri < 3 ? PT_STAGE_TEEN
+                                                 : PT_STAGE_ADULT, sp);
+        lv_obj_t *tok = rect(box, 6, 8, 26, 26, 6,
+                             lv > 0 ? p->body : COL_PIP_OFF);
+        if (lv > 0) {
+            border(tok, p->edge, 2);
+        }
+        label(tok, 0, 4, 26, &lv_font_montserrat_14,
+              lv > 0 ? p->edge : COL_DIM, lv > 0 ? "" : "?");
+
+        char line[32];
+        snprintf(line, sizeof(line), "#%d %s", (int) ri + 1,
+                 lv > 0 ? species_name(sp) : "???");
+        label(box, 38, 2, 110, &lv_font_montserrat_14, COL_INK, line);
+        for (uint8_t pip = 0; pip < 3; pip += 1) {
+            rect(box, 150 + pip * 9, 6, 6, 6, 2,
+                 lv > pip ? PIPC[pip] : COL_PIP_OFF);
+        }
+        if (lv == 0) {
+            label(box, 38, 22, 150, &lv_font_montserrat_14, COL_DIM,
+                  dex_locked_hint(sp));
+        } else {
+            uint8_t care = pt_dex_species_best_care(&s_dex_snap, sp);
+            snprintf(line, sizeof(line), "x%d raised  Best %s",
+                     (int) pt_dex_species_raised_count(&s_dex_snap, sp),
+                     care < 4 ? CAREW[care] : "-");
+            label(box, 38, 22, 150, &lv_font_montserrat_14, COL_BLUE, line);
+        }
+    }
+    lv_obj_t *b = rect(s_modal_body, 56, 160, 80, 24, 8, COL_DOCK_BG);
+    label(b, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Parts >");
+    s_dex_sel_box = b;
+    dex_mark_selected();
+}
+
+static void dex_build_parts(void)
+{
+    lv_obj_clean(s_modal_body);
+    s_dex_sel_box = NULL;
+
+    uint8_t total = pt_dex_part_total();
+    if (s_dex_cursor < 0) { s_dex_cursor = 0; }
+    if (s_dex_cursor >= total) { s_dex_cursor = total - 1; }
+    pt_gene_slot_t slot;
+    uint8_t idx;
+    dex_locate((uint8_t) s_dex_cursor, &slot, &idx);
+    uint8_t count = pt_slot_part_count(slot);
+    uint8_t page = (uint8_t) (idx / 8);
+    uint8_t pages = (uint8_t) ((count + 7) / 8);
+    uint8_t seen_n = 0;
+    for (uint8_t i = 0; i < count; i += 1) {
+        if (pt_dex_part_has(&s_dex_snap, PT_DEX_PART_SEEN, slot, i)) {
+            seen_n += 1;
+        }
+    }
+    char title[32];
+    snprintf(title, sizeof(title), "%s %d/%d  %d/%d",
+             dex_slot_name(slot), (int) page + 1, (int) pages,
+             (int) seen_n, (int) count);
+    lv_label_set_text(s_modal_title, title);
+
+    uint8_t shown = (uint8_t) (count - page * 8);
+    if (shown > 8) { shown = 8; }
+    for (uint8_t k = 0; k < shown; k += 1) {
+        uint8_t pi = (uint8_t) (page * 8 + k);
+        bool seen = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_SEEN, slot, pi);
+        bool owned = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_OWNED, slot, pi);
+        bool bred = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_BRED, slot, pi);
+        pt_rarity_t rar = pt_catalog_rarity(slot, pi);
+        int col = k % 4;
+        int row = k / 4;
+        lv_obj_t *cell = rect(s_modal_body, 4 + col * 46, 24 + row * 38,
+                              44, 34, 6, seen ? COL_PANEL : COL_PIP_OFF);
+        border(cell, seen ? dex_rarity_color(rar) : COL_DOCK_BG, 2);
+        char num[6];
+        snprintf(num, sizeof(num), "%d", (int) pi + 1);
+        label(cell, 0, 3, 44, &lv_font_montserrat_14,
+              seen ? dex_rarity_color(rar) : COL_DIM, seen ? num : "?");
+        label(cell, 4, 18, 12, &lv_font_montserrat_14,
+              seen ? dex_rarity_color(rar) : COL_DIM,
+              seen ? dex_rarity_letter(rar) : "");
+        if (owned) {
+            rect(cell, 32, 3, 7, 7, 2, COL_GREEN);
+        }
+        if (bred) {
+            rect(cell, 32, 14, 7, 7, 2, COL_SEL);
+        }
+        if (s_dex_focus == 0
+            && (int) (pt_dex_slot_offset(slot) + pi) == s_dex_cursor) {
+            s_dex_sel_box = cell;
+        }
+    }
+
+    // 选中部件说明。
+    bool seen = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_SEEN, slot, idx);
+    bool owned = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_OWNED, slot, idx);
+    bool bred = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_BRED, slot, idx);
+    static const char *const RN[4] = { "Common", "Unusual", "Rare", "Legend" };
+    char hint[40];
+    if (!seen) {
+        snprintf(hint, sizeof(hint), "#%d not seen yet", (int) idx + 1);
+    } else {
+        const char *mark = owned ? "your pet has it"
+                          : bred ? "bred into family" : "seen on a visitor";
+        snprintf(hint, sizeof(hint), "#%d %s - %s", (int) idx + 1,
+                 RN[pt_catalog_rarity(slot, idx)], mark);
+    }
+    label(s_modal_body, 2, 102, 188, &lv_font_montserrat_14, COL_INK, hint);
+
+    lv_obj_t *tab = rect(s_modal_body, 16, 124, 160, 24, 8, COL_DOCK_BG);
+    label(tab, 0, 3, 160, &lv_font_montserrat_14, COL_INK, "Badges >");
+    lv_obj_t *back = rect(s_modal_body, 56, 152, 80, 24, 8, COL_DOCK_BG);
+    label(back, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Back");
+    if (s_dex_focus == 1) { s_dex_sel_box = tab; }
+    if (s_dex_focus == 2) { s_dex_sel_box = back; }
+    dex_mark_selected();
+}
+
+static void dex_build_badges(void)
+{
+    lv_label_set_text(s_modal_title, "BADGES");
+    // 8 条内容：2 条总览 + 6 条纯血槽；每页 6 条，共 2 页。
+    const uint8_t pages = 2;
+    if (s_dex_page < 0) { s_dex_page = 0; }
+    if (s_dex_page >= pages) { s_dex_page = pages - 1; }
+
+    uint8_t hc = pt_social_hall_count(&s_ssnap);
+    for (uint8_t k = 0; k < 6; k += 1) {
+        uint8_t item = (uint8_t) (s_dex_page * 6 + k);
+        int y = 20 + k * 23;
+        char line[40];
+        if (item == 0) {
+            snprintf(line, sizeof(line), "Species %d/8  Parts %d/%d",
+                     (int) pt_dex_species_seen_count(&s_dex_snap),
+                     (int) pt_dex_parts_count(&s_dex_snap, PT_DEX_PART_SEEN),
+                     (int) pt_dex_part_total());
+            label(s_modal_body, 4, y, 184, &lv_font_montserrat_14,
+                  COL_INK, line);
+            continue;
+        }
+        if (item == 1) {
+            snprintf(line, sizeof(line), "Oldest: %d days",
+                     (int) s_dex_snap.oldest_days);
+            label(s_modal_body, 4, y, 184, &lv_font_montserrat_14,
+                  COL_BLUE, line);
+            continue;
+        }
+        pt_gene_slot_t slot = (pt_gene_slot_t) (item - 2);
+        uint8_t chain = pt_dex_pure_chain(hc > 0 ? s_ssnap.hall : NULL, hc,
+                                          slot);
+        if (chain >= 2) {
+            snprintf(line, sizeof(line), "Pure %s x%d",
+                     dex_slot_name(slot), (int) chain);
+            label(s_modal_body, 4, y, 184, &lv_font_montserrat_14,
+                  COL_YELLOW, line);
+        } else {
+            snprintf(line, sizeof(line), "Pure %s --", dex_slot_name(slot));
+            label(s_modal_body, 4, y, 184, &lv_font_montserrat_14,
+                  COL_DIM, line);
+        }
+    }
+    lv_obj_t *b = rect(s_modal_body, 56, 160, 80, 24, 8, COL_DOCK_BG);
+    label(b, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Album >");
+    s_dex_sel_box = b;
+    dex_mark_selected();
+}
+
+static void dex_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    s_dex_sel_box = NULL;
+    if (s_dex_tab == DEX_TAB_SPECIES) {
+        dex_build_species();
+    } else if (s_dex_tab == DEX_TAB_PARTS) {
+        dex_build_parts();
+    } else {
+        dex_build_badges();
+    }
+}
+
+static void dex_open(void)
+{
+    if (!pet_app_dex_snapshot(&s_dex_snap)) {
+        set_msg("Busy", 800);
+        return;
+    }
+    // 徽章页纯血链读名人堂；失败也允许打开（显示空链）。
+    (void) pet_app_social_snapshot(&s_ssnap);
+    s_have_ssnap = true;
+    s_dex_tab = DEX_TAB_SPECIES;
+    s_dex_page = 0;
+    s_dex_cursor = 0;
+    s_dex_focus = 0;
+    s_mode = MODE_DEX;
+    modal_open();
+    dex_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
+static void handle_dex_key(pet_ui_action_t act)
+{
+    if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        modal_close();
+        pet_audio_play(SND_CANCEL);
+        return;
+    }
+
+    if (s_dex_tab == DEX_TAB_SPECIES) {
+        if (act == PET_UI_ACT_PREV) {
+            s_dex_page = (s_dex_page + 2) % 3;
+            dex_build();
+        } else if (act == PET_UI_ACT_NEXT) {
+            s_dex_page = (s_dex_page + 1) % 3;
+            dex_build();
+        } else if (act == PET_UI_ACT_CONFIRM) {
+            s_dex_tab = DEX_TAB_PARTS;
+            s_dex_focus = 0;
+            s_dex_cursor = 0;   // 每次进入部件浏览从首件开始
+            dex_build();
+            pet_audio_play(SND_CONFIRM);
+        }
+        return;
+    }
+
+    if (s_dex_tab == DEX_TAB_BADGES) {
+        if (act == PET_UI_ACT_PREV) {
+            s_dex_page = (s_dex_page + 1) % 2;
+            dex_build();
+        } else if (act == PET_UI_ACT_NEXT) {
+            s_dex_page = (s_dex_page + 1) % 2;
+            dex_build();
+        } else if (act == PET_UI_ACT_CONFIRM) {
+            s_dex_tab = DEX_TAB_SPECIES;
+            s_dex_page = 0;
+            dex_build();
+            pet_audio_play(SND_CONFIRM);
+        }
+        return;
+    }
+
+    // 部件页
+    uint8_t total = pt_dex_part_total();
+    if (act == PET_UI_ACT_PREV) {
+        if (s_dex_focus == 1) {
+            s_dex_focus = 0;
+        } else if (s_dex_focus == 2) {
+            s_dex_focus = 1;
+        } else if (s_dex_cursor > 0) {
+            s_dex_cursor -= 1;
+        }
+        dex_build();
+    } else if (act == PET_UI_ACT_NEXT) {
+        if (s_dex_focus == 0) {
+            if (s_dex_cursor + 1 >= total) {
+                s_dex_focus = 1;
+            } else {
+                s_dex_cursor += 1;
+            }
+        } else if (s_dex_focus == 1) {
+            s_dex_focus = 2;
+        }
+        dex_build();
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        if (s_dex_focus == 1) {
+            s_dex_tab = DEX_TAB_BADGES;
+            s_dex_page = 0;
+            dex_build();
+            pet_audio_play(SND_CONFIRM);
+        } else if (s_dex_focus == 2) {
+            modal_close();
+            pet_audio_play(SND_CANCEL);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// G1 猜大小
+// ---------------------------------------------------------------------------
+
+static void game_set_choice_visual(void)
+{
+    bool hi = s_g_choice == PET_GAME_HIGH;
+    border(s_game_hi, hi ? COL_SEL : COL_INK, hi ? 3 : 1);
+    border(s_game_lo, !hi ? COL_SEL : COL_INK, !hi ? 3 : 1);
+}
+
+static void game_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    lv_label_set_text(s_modal_title, "HIGH-LOW");
+
+    char buf[24];
+    snprintf(buf, sizeof(buf), "[ %d ]", (int) pet_game_first_card(&s_game));
+    s_game_card = label(s_modal_body, 4, 6, 168, &lv_font_montserrat_20, COL_INK,
+                        buf);
+
+    s_game_hi = rect(s_modal_body, 10, 44, 72, 30, 8, COL_PANEL);
+    label(s_game_hi, 0, 5, 72, &lv_font_montserrat_14, COL_GREEN, "HIGH");
+    s_game_lo = rect(s_modal_body, 96, 44, 72, 30, 8, COL_PANEL);
+    label(s_game_lo, 0, 5, 72, &lv_font_montserrat_14, COL_BLUE, "LOW");
+    game_set_choice_visual();
+
+    s_game_result = label(s_modal_body, 4, 82, 168, &lv_font_montserrat_20,
+                          COL_INK, "");
+    snprintf(buf, sizeof(buf), "Wins: %d", (int) pet_game_wins(&s_game));
+    s_game_wins = label(s_modal_body, 4, 120, 168, &lv_font_montserrat_14,
+                        COL_INK, buf);
+    s_game_hint = label(s_modal_body, 4, 146, 168, &lv_font_montserrat_14,
+                        COL_INK, "UP/DOWN choose  OK deal");
+}
+
+static void game_open(void)
+{
+    if (s_snap.sick) {
+        set_msg("Not feeling well", 1200);
+        pet_audio_play(SND_SAD);
+        return;
+    }
+    uint32_t seed = (uint32_t) pet_clock_uptime_ms()
+        ^ (uint32_t) (s_snap.boot_count * 2246822519u);
+    pet_game_init(&s_game, seed);
+    s_g_phase = PHASE_CHOOSE;
+    s_g_choice = PET_GAME_HIGH;
+    s_g_exit_armed_until = 0;
+    s_mode = MODE_GAME;
+    modal_open();
+    game_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
+static const uint8_t G1_SCORE[6] = { 10, 34, 60, 85, 100, 100 };
+
+// S4 健身角：游戏/打工原始分 +10%（先于体力 ×80% 与老年放宽，05 §7.2）。
+static uint8_t decor_adjust_score(uint8_t score)
+{
+    uint8_t pct = pt_decor_score_pct(&s_dsnap);
+    uint16_t v = (uint16_t) ((uint16_t) score
+                             + (uint16_t) score * pct / 100u);
+    return v > 100 ? 100 : (uint8_t) v;
+}
+
+// G1 打工短关结算：3 局制，老年放宽，走工资而非游戏奖金。
+static void g1_job_finish(void)
+{
+    uint8_t wins = pet_game_wins(&s_game);
+    uint8_t score = decor_adjust_score(G1_SCORE[wins > 5 ? 5 : wins]);
+    uint8_t grade = pet_grade_for_job(score, s_snap.energy,
+                                      s_snap.stage == PT_STAGE_SENIOR);
+    pet_app_job_work(s_jobs.job, grade);
+    s_mood = MOOD_HAPPY;
+    s_mood_until = now_ms() + 900;
+    s_g1_job = false;
+    modal_close();
+}
+
+static void game_exit(void)
+{
+    uint8_t wins = pet_game_wins(&s_game);
+    if (s_g1_job) {
+        // 长按退出 = 中途放弃：与 G2–G6 短关口径一致，无工资（07 §2）。
+        s_g1_job = false;
+        pet_audio_play(SND_CANCEL);
+        modal_close();
+        return;
+    }
+    if (wins > 0) {
+        uint8_t score = decor_adjust_score(G1_SCORE[wins > 5 ? 5 : wins]);
+        uint8_t grade = pet_grade_from_score(score, s_snap.energy);
+        pet_app_game_result(PT_GAME_G1_HILO, grade);
+        s_mood = MOOD_HAPPY;
+        s_mood_until = now_ms() + 900;
+    } else {
+        pet_audio_play(SND_CANCEL);
+    }
+    modal_close();
+}
+
+static void game_key_click(pet_btn_t btn)
+{
+    char buf[32];
+    if (s_g_phase == PHASE_CHOOSE) {
+        if (btn == PET_BTN_UP) {
+            s_g_choice = PET_GAME_HIGH;
+            game_set_choice_visual();
+            pet_audio_play(SND_CONFIRM);
+        } else if (btn == PET_BTN_DOWN) {
+            s_g_choice = PET_GAME_LOW;
+            game_set_choice_visual();
+            pet_audio_play(SND_CONFIRM);
+        } else if (btn == PET_BTN_OK) {
+            pet_game_result_t r = pet_game_choose(&s_game, s_g_choice);
+            s_g_phase = PHASE_RESULT;
+            if (r == PET_GAME_WIN) {
+                lv_label_set_text(s_game_result, "WIN!");
+                lv_obj_set_style_text_color(s_game_result,
+                                            lv_color_hex(COL_GREEN), 0);
+                pet_audio_play(SND_HAPPY);
+            } else if (r == PET_GAME_LOSE) {
+                lv_label_set_text(s_game_result, "LOST");
+                lv_obj_set_style_text_color(s_game_result,
+                                            lv_color_hex(COL_RED), 0);
+                pet_audio_play(SND_SAD);
+            } else {
+                lv_label_set_text(s_game_result, "TIE");
+                lv_obj_set_style_text_color(s_game_result,
+                                            lv_color_hex(COL_INK), 0);
+                pet_audio_play(SND_CONFIRM);
+            }
+            snprintf(buf, sizeof(buf), "Second: %d",
+                     (int) pet_game_second_card(&s_game));
+            label(s_modal_body, 4, 100, 168, &lv_font_montserrat_14, COL_INK,
+                  buf);   // 临时说明行
+            snprintf(buf, sizeof(buf), "Wins: %d",
+                     (int) pet_game_wins(&s_game));
+            lv_label_set_text(s_game_wins, buf);
+            lv_label_set_text(s_game_hint, "OK next");
+        }
+    } else {
+        // RESULT：OK 进入下一局（TIE 时第一张已在 choose 内重发）。
+        if (btn != PET_BTN_OK) {
+            return;
+        }
+        if (s_g1_job && s_game.played >= 3) {
+            g1_job_finish();   // 打工短关 3 局封顶
+            return;
+        }
+        pet_game_next_round(&s_game);
+        s_g_phase = PHASE_CHOOSE;
+        game_build();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 游戏选择器 + G2–G6 运行时（07 §2 统一框架：READY → 游玩 → 评级结算）
+// ---------------------------------------------------------------------------
+
+static const char *const GAMES_NAME[PT_GAME_COUNT] = {
+    "Hi-Lo", "Rhythm", "Catch", "Memory", "Walk", "Prefer",
+};
+static const char *const GAMES_SKILL[PT_GAME_COUNT] = {
+    "Mind", "Art", "Body", "Mind", "Body", "Bond",
+};
+
+// ---- 选择器 ---------------------------------------------------------------
+
+static void gx_open(uint8_t id);   // G2–G6 运行时在下方定义
+
+static void games_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    lv_label_set_text(s_modal_title, "GAMES");
+    for (uint8_t i = 0; i < PT_GAME_COUNT; i += 1) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%s  %s", GAMES_NAME[i], GAMES_SKILL[i]);
+        lv_obj_t *r = rect(s_modal_body, 8, 6 + i * 27, 176, 24, 8, COL_PANEL);
+        label(r, 0, 3, 176, &lv_font_montserrat_14, COL_INK, buf);
+        s_games_row[i] = r;
+    }
+    for (uint8_t i = 0; i < PT_GAME_COUNT; i += 1) {
+        border(s_games_row[i], i == (uint8_t) s_games_sel ? COL_SEL : COL_INK,
+               i == (uint8_t) s_games_sel ? 3 : 1);
+    }
+}
+
+static void games_open(void)
+{
+    if (s_snap.sick) {
+        set_msg("Not feeling well", 1200);
+        pet_audio_play(SND_SAD);
+        return;
+    }
+    s_games_sel = 0;
+    s_mode = MODE_GAMES;
+    modal_open();
+    games_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
+static void handle_games_key(pet_ui_action_t act)
+{
+    if (act == PET_UI_ACT_PREV) {
+        s_games_sel = (s_games_sel + PT_GAME_COUNT - 1) % PT_GAME_COUNT;
+        games_build();
+        pet_audio_play(SND_CONFIRM);
+    } else if (act == PET_UI_ACT_NEXT) {
+        s_games_sel = (s_games_sel + 1) % PT_GAME_COUNT;
+        games_build();
+        pet_audio_play(SND_CONFIRM);
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        if (s_games_sel == PT_GAME_G1_HILO) {
+            s_g1_job = false;
+            game_open();           // G1 沿用既有界面
+        } else {
+            gx_open((uint8_t) s_games_sel);
+        }
+    } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        pet_audio_play(SND_CANCEL);
+        modal_close();
+    }
+}
+
+// ---- GX 公共部件 ----------------------------------------------------------
+
+static void gx_hide_all(void)
+{
+    for (uint8_t i = 0; i < 8; i += 1) {
+        hide(s_gx_mk[i]);
+    }
+    for (uint8_t i = 0; i < 4; i += 1) {
+        hide(s_gx_ml[i]);
+    }
+}
+
+static void gx_mk(uint8_t i, int32_t x, int32_t y, int32_t w, int32_t h,
+                  uint32_t color)
+{
+    lv_obj_set_pos(s_gx_mk[i], x, y);
+    lv_obj_set_size(s_gx_mk[i], w, h);
+    lv_obj_set_style_bg_color(s_gx_mk[i], lv_color_hex(color), 0);
+    border(s_gx_mk[i], COL_INK, 0);
+    show(s_gx_mk[i]);
+}
+
+static void gx_ml(uint8_t i, int32_t x, int32_t y, int32_t w, uint32_t color,
+                  const char *txt)
+{
+    lv_obj_set_pos(s_gx_ml[i], x, y);
+    lv_obj_set_width(s_gx_ml[i], w);
+    lv_obj_set_style_text_color(s_gx_ml[i], lv_color_hex(color), 0);
+    lv_label_set_text(s_gx_ml[i], txt);
+    show(s_gx_ml[i]);
+}
+
+static const char *gx_grade_word(uint8_t grade)
+{
+    if (grade == PT_GAME_GRADE_PERFECT) {
+        return "PERFECT!";
+    }
+    if (grade == PT_GAME_GRADE_GREAT) {
+        return "GREAT!";
+    }
+    return "GOOD";
+}
+
+static void gx_finish(void);
+
+// ---- 各游戏绘制 -----------------------------------------------------------
+
+static void gx_render_g2(void)
+{
+    gx_hide_all();
+    gx_mk(0, 10, 88, 176, 12, COL_PIP_OFF);                 // 判定条
+    gx_mk(1, 54, 88, 88, 12, COL_ROOM_TOP);                 // 中心区
+    int32_t cx = 14 + (s_g2.pos + 100) * 168 / 200;
+    gx_mk(2, cx - 4, 84, 8, 20, COL_SEL);                   // 游标
+    char buf[24];
+    snprintf(buf, sizeof(buf), "Beat %d/5", s_g2.beat + (s_g2.done ? 0 : 1));
+    lv_label_set_text(s_gx_info, buf);
+}
+
+static void gx_render_g3(void)
+{
+    gx_hide_all();
+    gx_mk(0, 83, 26, 2, 128, COL_DOCK_BG);
+    gx_mk(1, 153, 26, 2, 128, COL_DOCK_BG);
+    // 玩家在底线
+    static const int32_t lane_x[3] = { 14, 89, 164 };
+    gx_mk(7, lane_x[s_g3.player], 152, 52, 8, COL_SEL);
+    uint8_t used = 2;
+    for (uint8_t i = 0; i < 5; i += 1) {
+        if (s_g3.drops[i].lane < 0 || used >= 7) {
+            continue;
+        }
+        int32_t y = 150 - (4 - s_g3.drops[i].row) * 24;
+        gx_mk(used, lane_x[s_g3.drops[i].lane] + 18, y, 16, 14,
+              s_g3.drops[i].bad ? COL_RED : COL_GREEN);
+        used += 1;
+    }
+    char buf[26];
+    snprintf(buf, sizeof(buf), "%2ds  %3d",
+             (int) ((PET_G3_TICKS - s_g3.tick + 9) / 10), (int) s_g3.score);
+    lv_label_set_text(s_gx_info, buf);
+}
+
+static void gx_pads(bool lit_mode)
+{
+    static const char *const PAD[3] = { "A", "B", "C" };
+    static const int32_t py[3] = { 36, 92, 148 };
+    for (uint8_t i = 0; i < 3; i += 1) {
+        gx_mk(i, 14, py[i], 168, 40, COL_PANEL);
+        uint8_t mark = lit_mode ? s_g4_lit : s_gx_sel;
+        border(s_gx_mk[i], i == mark ? COL_SEL : COL_INK,
+               i == mark ? 3 : 1);
+        gx_ml(i, 14, py[i] + 9, 168, COL_INK, PAD[i]);
+    }
+}
+
+static void gx_render_g4(void)
+{
+    gx_hide_all();
+    if (s_g4.phase == PET_G4_SHOW) {
+        gx_pads(true);
+        lv_label_set_text(s_gx_info, "Watch...");
+    } else {
+        gx_pads(false);
+        char buf[20];
+        snprintf(buf, sizeof(buf), "Repeat %d/7",
+                 s_g4.level > 7 ? 7 : (int) s_g4.level);
+        lv_label_set_text(s_gx_info, buf);
+    }
+}
+
+static void gx_render_g5(void)
+{
+    gx_hide_all();
+    gx_mk(0, 10, 124, 176, 3, COL_PIP_OFF);                 // 判定线
+    gx_mk(1, 24, 110, 12, 16, COL_BLUE);                    // 玩家
+    if (s_g5.next_obs < PET_G5_OBSTACLES) {
+        const pet_g5_obs_t *o = &s_g5.obs[s_g5.next_obs];
+        int32_t d = o->arrive - s_g5.tick;
+        int32_t x = 30 + d * 5;
+        if (x < 40) {
+            x = 40;
+        }
+        if (x > 182) {
+            x = 182;
+        }
+        gx_mk(2, x, 104, 12, 24,
+              o->action == PET_G5_UP ? COL_YELLOW : COL_GREEN);
+    }
+    char buf[28];
+    snprintf(buf, sizeof(buf), "%d/%d  combo %d", (int) s_g5.cleared,
+             PET_G5_OBSTACLES, (int) s_g5.combo);
+    lv_label_set_text(s_gx_info, buf);
+}
+
+static void gx_render_g6(void)
+{
+    gx_hide_all();
+    static const char *const HINT[3] = {
+        "Hungry!", "Playful!", "Cuddly!",
+    };
+    static const char *const OPT[3] = { "Food", "Toy", "Hug" };
+    static const int32_t oy[3] = { 92, 122, 152 };
+    gx_ml(0, 4, 42, 188, COL_INK, HINT[s_g6.hint]);
+    for (uint8_t i = 0; i < 3; i += 1) {
+        gx_mk(i, 30, oy[i], 136, 24, COL_PANEL);
+        border(s_gx_mk[i], i == s_gx_sel ? COL_SEL : COL_INK,
+               i == s_gx_sel ? 3 : 1);
+        gx_ml(i + 1, 30, oy[i] + 3, 136, COL_INK, OPT[i]);
+    }
+    char buf[16];
+    snprintf(buf, sizeof(buf), "Q %d/%d",
+             pet_g6_done(&s_g6) ? PET_G6_QUESTIONS : s_g6.question + 1,
+             PET_G6_QUESTIONS);
+    lv_label_set_text(s_gx_info, buf);
+}
+
+static void gx_render(void)
+{
+    if (s_gx_phase == 0) {
+        gx_hide_all();
+        lv_label_set_text(s_gx_info, "GET READY");
+        lv_label_set_text(s_gx_hint, "");
+        return;
+    }
+    if (s_gx_phase == 2) {
+        gx_hide_all();
+        return;
+    }
+    switch (s_gx_id) {
+    case PT_GAME_G2_RHYTHM: gx_render_g2(); break;
+    case PT_GAME_G3_CATCH:  gx_render_g3(); break;
+    case PT_GAME_G4_MEMORY: gx_render_g4(); break;
+    case PT_GAME_G5_WALK:   gx_render_g5(); break;
+    case PT_GAME_G6_PREFER: gx_render_g6(); break;
+    default: break;
+    }
+}
+
+// ---- 生命周期 -------------------------------------------------------------
+
+static void gx_build_shell(void)
+{
+    lv_obj_clean(s_modal_body);
+    lv_label_set_text(s_modal_title, GAMES_NAME[s_gx_id]);
+    s_gx_info = label(s_modal_body, 4, 6, 188, &lv_font_montserrat_14,
+                      COL_INK, "");
+    s_gx_hint = label(s_modal_body, 4, 214, 188, &lv_font_montserrat_14,
+                      COL_DIM, "");
+    for (uint8_t i = 0; i < 8; i += 1) {
+        s_gx_mk[i] = rect(s_modal_body, 0, 0, 4, 4, 4, COL_PANEL);
+        hide(s_gx_mk[i]);
+    }
+    for (uint8_t i = 0; i < 4; i += 1) {
+        s_gx_ml[i] = label(s_modal_body, 0, 0, 188,
+                           &lv_font_montserrat_14, COL_INK, "");
+        lv_obj_set_style_text_align(s_gx_ml[i], LV_TEXT_ALIGN_CENTER, 0);
+        hide(s_gx_ml[i]);
+    }
+}
+
+static const char *gx_hint_text(void)
+{
+    switch (s_gx_id) {
+    case PT_GAME_G2_RHYTHM: return "OK on center";
+    case PT_GAME_G3_CATCH:  return "UP/DOWN move";
+    case PT_GAME_G4_MEMORY: return "UP/DOWN  OK";
+    case PT_GAME_G5_WALK:   return "UP jump DOWN duck";
+    case PT_GAME_G6_PREFER: return "UP/DOWN  OK";
+    default:                return "";
+    }
+}
+
+static void gx_open(uint8_t id)
+{
+    if (s_snap.sick) {
+        set_msg("Not feeling well", 1200);
+        pet_audio_play(SND_SAD);
+        return;
+    }
+    s_gx_id = id;
+    s_gx_job = false;
+    uint32_t seed = (uint32_t) pet_clock_uptime_ms()
+        ^ (uint32_t) (s_snap.boot_count * 2246822519u)
+        ^ (uint32_t) (id * 2654435761u);
+    switch (id) {
+    case PT_GAME_G2_RHYTHM: pet_g2_init(&s_g2); s_g2_from = -100; break;
+    case PT_GAME_G3_CATCH:  pet_g3_init(&s_g3, seed); break;
+    case PT_GAME_G4_MEMORY: pet_g4_init(&s_g4, seed); s_g4_lit = 0xFF; break;
+    case PT_GAME_G5_WALK:   pet_g5_init(&s_g5, seed); break;
+    case PT_GAME_G6_PREFER: pet_g6_init(&s_g6, seed, PT_FOOD_TAG_MEAL);
+                            s_gx_sel = 0; break;
+    default: return;
+    }
+    s_gx_phase = 0;
+    s_gx_t0 = now_ms();
+    s_gx_next_ms = 0;
+    s_gx_exit_armed_until = 0;
+    s_mode = MODE_GX;
+    modal_open();
+    gx_build_shell();
+    gx_render();
+    pet_audio_play(SND_CONFIRM);
+}
+
+static void gx_finish(void)
+{
+    uint8_t score = 0;
+    switch (s_gx_id) {
+    case PT_GAME_G2_RHYTHM: score = pet_g2_score(&s_g2); break;
+    case PT_GAME_G3_CATCH:  score = pet_g3_score(&s_g3); break;
+    case PT_GAME_G4_MEMORY: score = pet_g4_score(&s_g4); break;
+    case PT_GAME_G5_WALK:   score = pet_g5_score(&s_g5); break;
+    case PT_GAME_G6_PREFER: score = pet_g6_score(&s_g6); break;
+    default: break;
+    }
+    score = decor_adjust_score(score);
+    uint8_t grade = pet_grade_from_score(score, s_snap.energy);
+    if (s_gx_job) {        // 打工短关：老年阈值放宽 10%，结算走工资（引擎只扣体力，不碰游戏预算）。
+        grade = pet_grade_for_job(score, s_snap.energy,
+                                  s_snap.stage == PT_STAGE_SENIOR);
+        pet_app_job_work(s_jobs.job, grade);
+    } else {
+        pet_app_game_result(s_gx_id, grade);
+    }
+    s_gx_phase = 2;
+    s_gx_t0 = now_ms();
+    s_mood = MOOD_HAPPY;
+    s_mood_until = now_ms() + 900;
+    gx_hide_all();
+    gx_ml(0, 4, 70, 188, COL_GREEN, gx_grade_word(grade));
+    char buf[24];
+    if (s_gx_job) {
+        snprintf(buf, sizeof(buf), "+%u G wage",
+                 (unsigned) pt_job_wage((pt_job_id_t) s_jobs.job, grade));
+    } else {
+        snprintf(buf, sizeof(buf), "Score %d", (int) score);
+    }
+    gx_ml(1, 4, 110, 188, COL_INK, buf);
+    lv_label_set_text(s_gx_hint, "OK");
+    pet_audio_play(grade == PT_GAME_GRADE_GOOD ? SND_CONFIRM : SND_HAPPY);
+}
+
+// G2 一拍结束（按下或漏拍）：满 5 拍结算，否则从另一端重新扫。
+static void g2_after_beat(void)
+{
+    if (s_g2.done) {
+        gx_finish();
+        return;
+    }
+    s_g2_from = (int16_t) -s_g2_from;
+    s_g2.pos = (int8_t) s_g2_from;
+    s_g2.dir = s_g2_from < 0 ? 1 : -1;
+    gx_render_g2();
+}
+
+// 定时器推进（仅 LVGL 任务内调用，与输入串行）。
+static void gx_refresh(int64_t now)
+{
+    if (s_gx_phase == 0) {
+        if (now - s_gx_t0 >= 1200) {
+            s_gx_phase = 1;
+            s_gx_next_ms = now;
+            lv_label_set_text(s_gx_hint, gx_hint_text());
+            gx_render();
+        }
+        return;
+    }
+    if (s_gx_phase == 2) {
+        if (now - s_gx_t0 >= 1500) {
+            modal_close();
+        }
+        return;
+    }
+    switch (s_gx_id) {
+    case PT_GAME_G2_RHYTHM:
+        pet_g2_tick(&s_g2);
+        if (s_g2.pos == (int8_t) -s_g2_from) {
+            pet_g2_miss(&s_g2);
+            pet_audio_play(SND_SAD);
+            g2_after_beat();
+        } else {
+            gx_render_g2();
+        }
+        break;
+    case PT_GAME_G3_CATCH:
+        // 打工短关：15s（普通游戏 30s）。
+        if (s_gx_job && s_g3.tick >= PET_G3_TICKS / 2) {
+            gx_finish();
+            break;
+        }
+        pet_g3_tick(&s_g3);
+        pet_g3_tick(&s_g3);
+        if (pet_g3_done(&s_g3)) {
+            gx_finish();
+        } else {
+            gx_render_g3();
+        }
+        break;
+    case PT_GAME_G4_MEMORY:
+        if (s_g4.phase == PET_G4_SHOW && now >= s_gx_next_ms) {
+            uint8_t pad = pet_g4_next_pad(&s_g4);
+            if (pad == 0xFFu) {
+                pet_g4_start_input(&s_g4);
+                s_gx_sel = 0;
+                s_gx_next_ms = now + 300;
+            } else {
+                s_g4_lit = pad;
+                s_gx_next_ms = now + 420;
+            }
+            gx_render_g4();
+        }
+        break;
+    case PT_GAME_G5_WALK:
+        // 打工短关：4 个障碍（普通散步 6 个）。
+        if (s_gx_job && s_g5.next_obs >= 4) {
+            gx_finish();
+            break;
+        }
+        pet_g5_tick(&s_g5);
+        if (pet_g5_done(&s_g5)) {
+            gx_finish();
+        } else {
+            gx_render_g5();
+        }
+        break;
+    case PT_GAME_G6_PREFER:
+        break;
+    default:
+        break;
+    }
+}
+
+static void gx_click(pet_btn_t btn)
+{
+    if (s_gx_phase == 0) {
+        s_gx_phase = 1;                       // 跳过 READY
+        s_gx_t0 = now_ms();
+        s_gx_next_ms = now_ms();
+        lv_label_set_text(s_gx_hint, gx_hint_text());
+        gx_render();
+        return;
+    }
+    if (s_gx_phase == 2) {
+        modal_close();
+        return;
+    }
+    switch (s_gx_id) {
+    case PT_GAME_G2_RHYTHM:
+        if (btn == PET_BTN_OK) {
+            uint8_t d = (uint8_t) (s_g2.pos < 0 ? -s_g2.pos : s_g2.pos);
+            pet_g2_press(&s_g2);
+            pet_audio_play(d <= 30 ? SND_HAPPY : SND_CONFIRM);
+            g2_after_beat();
+        }
+        break;
+    case PT_GAME_G3_CATCH:
+        if (btn == PET_BTN_UP) {
+            pet_g3_move(&s_g3, -1);
+        } else if (btn == PET_BTN_DOWN) {
+            pet_g3_move(&s_g3, 1);
+        }
+        gx_render_g3();
+        break;
+    case PT_GAME_G4_MEMORY:
+        if (s_g4.phase != PET_G4_INPUT) {
+            break;
+        }
+        if (btn == PET_BTN_UP) {
+            s_gx_sel = (s_gx_sel + 2) % 3;
+            gx_render_g4();
+        } else if (btn == PET_BTN_DOWN) {
+            s_gx_sel = (s_gx_sel + 1) % 3;
+            gx_render_g4();
+        } else if (btn == PET_BTN_OK) {
+            if (pet_g4_input(&s_g4, s_gx_sel)) {
+                pet_audio_play(SND_CONFIRM);
+                if (s_g4.phase == PET_G4_SHOW) {
+                    // 打工短关：过完 5 级即结算（普通 7 级）。
+                    if (s_gx_job && s_g4.level >= 6) {
+                        gx_finish();
+                    } else {
+                        s_g4_lit = 0xFF;
+                        s_gx_next_ms = now_ms() + 500;
+                    }
+                } else {   // DONE（7 全过）
+                    gx_finish();
+                }
+            } else {
+                pet_audio_play(SND_SAD);
+                gx_finish();
+            }
+        }
+        break;
+    case PT_GAME_G5_WALK:
+        if (btn == PET_BTN_UP || btn == PET_BTN_DOWN) {
+            uint8_t ok = pet_g5_act(&s_g5,
+                                    btn == PET_BTN_UP ? PET_G5_UP : PET_G5_DOWN);
+            pet_audio_play(ok ? SND_HAPPY : SND_SAD);
+            if ((s_gx_job && s_g5.next_obs >= 4) || pet_g5_done(&s_g5)) {
+                gx_finish();
+            } else {
+                gx_render_g5();
+            }
+        }
+        break;
+    case PT_GAME_G6_PREFER:
+        if (btn == PET_BTN_UP) {
+            s_gx_sel = (s_gx_sel + 2) % 3;
+            gx_render_g6();
+        } else if (btn == PET_BTN_DOWN) {
+            s_gx_sel = (s_gx_sel + 1) % 3;
+            gx_render_g6();
+        } else if (btn == PET_BTN_OK) {
+            bool ok = pet_g6_answer(&s_g6, (pet_g6_choice_t) s_gx_sel);
+            pet_audio_play(ok ? SND_HAPPY : SND_SAD);
+            if (pet_g6_done(&s_g6)) {
+                gx_finish();
+            } else {
+                gx_render_g6();
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 成年职业：办公室 + 职介所（07 §5）
+// ---------------------------------------------------------------------------
+
+static void job_req_text(const pt_job_def_t *d, char *buf, size_t n)
+{
+    if (d->always) {
+        snprintf(buf, n, "No requirement");
+        return;
+    }
+    int len = 0;
+    if (d->need_mind) {
+        len += snprintf(buf + len, n - (size_t) len, "Mind %d", d->need_mind);
+    }
+    if (d->need_body) {
+        len += snprintf(buf + len, n - (size_t) len, "%sBody %d",
+                        len ? "  " : "", d->need_body);
+    }
+    if (d->need_art) {
+        snprintf(buf + len, n - (size_t) len, "%sArt %d",
+                 len ? "  " : "", d->need_art);
+    }
+}
+
+static void job_office_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    lv_label_set_text(s_modal_title, "WORK");
+    const pt_job_def_t *d = pt_job_def((pt_job_id_t) s_jobs.job);
+    char buf[40];
+
+    label(s_modal_body, 4, 4, 184, &lv_font_montserrat_20, COL_INK, d->name);
+    snprintf(buf, sizeof(buf), "%s mini-game", GAMES_NAME[d->game]);
+    label(s_modal_body, 4, 32, 184, &lv_font_montserrat_14, COL_DIM, buf);
+    snprintf(buf, sizeof(buf), "Shifts today: %d/3",
+             (int) s_jobs.shifts_today);
+    label(s_modal_body, 4, 54, 184, &lv_font_montserrat_14, COL_INK, buf);
+    snprintf(buf, sizeof(buf), "Wage: %u/%u/%u G",
+             (unsigned) d->wage[0], (unsigned) d->wage[1],
+             (unsigned) d->wage[2]);
+    label(s_modal_body, 4, 74, 184, &lv_font_montserrat_14, COL_YELLOW, buf);
+    if (s_jobs.worker_sticker) {
+        label(s_modal_body, 4, 94, 184, &lv_font_montserrat_14, COL_GREEN,
+              "* Model worker");
+    }
+
+    bool can = pt_jobs_can_work(&s_jobs) && !s_snap.sick
+        && (s_snap.stage == PT_STAGE_ADULT
+            || s_snap.stage == PT_STAGE_SENIOR)
+        && s_snap.energy >= PT_CFG_JOB_MIN_ENERGY;
+    s_job_row[0] = rect(s_modal_body, 8, 132, 176, 28, 8,
+                        can ? COL_PANEL : COL_PIP_OFF);
+    label(s_job_row[0], 0, 4, 176, &lv_font_montserrat_14,
+          can ? COL_INK : COL_DIM, can ? "Work shift  (OK)"
+                                       : "Rest (no shift now)");
+    s_job_row[1] = rect(s_modal_body, 8, 168, 176, 28, 8, COL_PANEL);
+    label(s_job_row[1], 0, 4, 176, &lv_font_montserrat_14, COL_INK,
+          "Job agency");
+    for (uint8_t i = 0; i < 2; i += 1) {
+        border(s_job_row[i], i == (uint8_t) s_job_sel ? COL_SEL : COL_INK,
+               i == (uint8_t) s_job_sel ? 3 : 1);
+    }
+}
+
+static void job_office_open(void)
+{
+    if (s_snap.stage != PT_STAGE_ADULT && s_snap.stage != PT_STAGE_SENIOR) {
+        set_msg("Grow up first", 1200);
+        pet_audio_play(SND_CANCEL);
+        return;
+    }
+    (void) pet_app_jobs_snapshot(&s_jobs);
+    s_job_sel = 0;
+    s_mode = MODE_JOB;
+    modal_open();
+    job_office_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
+// 开工：按当前职业绑定的玩法开缩短版短关；G1 沿用旧界面，其余复用 GX 运行时。
+static void job_start_shift(void)
+{
+    if (!pt_jobs_can_work(&s_jobs)) {
+        set_msg("3 shifts done today", 1200);
+        pet_audio_play(SND_CANCEL);
+        return;
+    }
+    if (s_snap.sick || s_snap.energy < PT_CFG_JOB_MIN_ENERGY) {
+        set_msg(s_snap.sick ? "Not feeling well" : "Too tired to work", 1200);
+        pet_audio_play(SND_SAD);
+        return;
+    }
+    const pt_job_def_t *d = pt_job_def((pt_job_id_t) s_jobs.job);
+    if (d->game == PT_GAME_G1_HILO) {
+        s_g1_job = true;
+        game_open();
+    } else {
+        s_gx_job = true;
+        gx_open(d->game);
+        s_gx_job = true;   // gx_open 内部会复位，打开后再置位
+    }
+}
+
+static void agency_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    lv_label_set_text(s_modal_title, "AGENCY");
+    s_agency_n = pt_jobs_list(s_snap.skill, s_agency_ids, PT_JOB_COUNT);
+    char buf[40];
+    for (uint8_t i = 0; i < s_agency_n && i < PT_JOB_COUNT; i += 1) {
+        const pt_job_def_t *d = pt_job_def(s_agency_ids[i]);
+        lv_obj_t *r = rect(s_modal_body, 4, 4 + i * 23, 184, 21, 6,
+                           COL_PANEL);
+        char req[28];
+        job_req_text(d, req, sizeof(req));
+        snprintf(buf, sizeof(buf), "%s%s  %s",
+                 d->name, s_agency_ids[i] == s_jobs.job ? " *" : "", req);
+        label(r, 4, 2, 176, &lv_font_montserrat_14, COL_INK, buf);
+        s_agency_row[i] = r;
+        border(r, i == (uint8_t) s_agency_sel ? COL_SEL : COL_INK,
+               i == (uint8_t) s_agency_sel ? 3 : 1);
+    }
+}
+
+static void agency_open(void)
+{
+    s_agency_sel = 0;
+    s_mode = MODE_AGENCY;
+    agency_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
+static void handle_job_key(pet_ui_action_t act)
+{
+    if (act == PET_UI_ACT_PREV) {
+        s_job_sel = (s_job_sel + 1) % 2;
+        job_office_build();
+    } else if (act == PET_UI_ACT_NEXT) {
+        s_job_sel = (s_job_sel + 1) % 2;
+        job_office_build();
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        if (s_job_sel == 0) {
+            job_start_shift();
+        } else {
+            agency_open();
+        }
+    } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        pet_audio_play(SND_CANCEL);
+        modal_close();
+    }
+}
+
+static void handle_agency_key(pet_ui_action_t act)
+{
+    if (act == PET_UI_ACT_PREV) {
+        s_agency_sel = (int8_t) ((s_agency_sel + s_agency_n - 1)
+                                 % s_agency_n);
+        agency_build();
+    } else if (act == PET_UI_ACT_NEXT) {
+        s_agency_sel = (int8_t) ((s_agency_sel + 1) % s_agency_n);
+        agency_build();
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        pt_job_id_t pick = s_agency_ids[s_agency_sel];
+        if (pick == s_jobs.job) {
+            set_msg("Already working here", 1100);
+            pet_audio_play(SND_CANCEL);
+            return;
+        }
+        if (!pt_jobs_can_switch(&s_jobs, s_snap.day_id)) {
+            set_msg("Try again next month", 1300);
+            pet_audio_play(SND_CANCEL);
+            return;
+        }
+        pet_app_job_switch((uint8_t) pick);
+        s_jobs.job = (uint8_t) pick;   // 乐观镜像（裁决条件与本地一致）
+        s_jobs.switch_period = (uint16_t) (s_snap.day_id
+                                           / PT_JOB_SWITCH_PERIOD_D);
+        set_msg("New job!", 1200);
+        pet_audio_play(SND_HAPPY);
+        modal_close();
+    } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        pet_audio_play(SND_CANCEL);
+        s_mode = MODE_JOB;
+        job_office_build();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 全屏演出与死亡纪念
+// ---------------------------------------------------------------------------
+
+static void eff_start(int kind)
+{
+    s_eff_kind = kind;
+    s_eff_t0 = now_ms();
+    s_eff_rebuilt = false;
+    s_mode = MODE_OVERLAY;
+    // 演出全屏接管：停掉蛋的持续摆动；reveal 时 build_creature 会按新阶段重建。
+    lv_anim_delete(s_creature, NULL);
+    // 孵化/进化可能在喂食等弹层开着时发生：弹层让位，避免演出结束后残留。
+    hide(s_modal);
+    show(s_eff_cont);
+    lv_obj_move_foreground(s_eff_cont);
+    lv_obj_set_style_bg_opa(s_eff_cont, LV_OPA_COVER, 0);
+    if (kind == EFF_HATCH) {
+        lv_label_set_text(s_eff_txt, "!");
+    } else {
+        lv_label_set_text(s_eff_txt, "?");
+    }
+}
+
+static void memorial_open(void)
+{
+    lv_label_set_text(s_memorial_name, species_name(s_snap.species));
+    char buf[48];
+    snprintf(buf, sizeof(buf), "Age %d days", (int) s_snap.age_days);
+    lv_label_set_text(s_memorial_line, buf);
+    // 遗物占位：终养评价（designs 13 P0-C；正式遗物系统随世代期上线）。
+    pt_care_tier_t tier = pt_care_tier(&s_snap.ledger, false);
+    const char *word;
+    switch (tier) {
+    case PT_CARE_PERFECT: word = "A beloved friend"; break;
+    case PT_CARE_GREAT:   word = "A cherished friend"; break;
+    case PT_CARE_NORMAL:  word = "A steady friend"; break;
+    default:              word = "Remember gently"; break;
+    }
+    lv_label_set_text(s_memorial_tier, word);
+    show(s_memorial);
+    lv_obj_move_foreground(s_memorial);
+    s_mode = MODE_MEMORIAL;
+}
+
+// ---------------------------------------------------------------------------
+// 事件处理
+// ---------------------------------------------------------------------------
+
+static void on_app_event(const pt_event_t *ev)
+{
+    switch (ev->kind) {
+    case PT_EV_HATCH:
+        eff_start(EFF_HATCH);
+        break;
+    case PT_EV_EVOLUTION:
+        eff_start(EFF_EVOLVE);
+        break;
+    case PT_EV_DEATH:
+        memorial_open();
+        break;
+    case PT_EV_CALL_RAISED: {
+        pet_dock_focus_call(&s_dock, (pt_call_kind_t) ev->a);
+        dock_refresh_selected();
+        if (ev->a == PT_CALL_HUNGRY) {
+            set_msg("Hungry!", 1500);
+        } else if (ev->a == PT_CALL_SAD) {
+            set_msg("Wants attention", 1500);
+        } else {
+            set_msg("Lights out?", 1500);
+        }
+        lv_obj_t *box = s_dock_w[pet_dock_selected(&s_dock)].box;
+        if (box != NULL) {
+            bounce(box, DOCK_TILE_Y, -6, 180);
+        }
+        break;
+    }
+    case PT_EV_SICK:
+        set_msg("Not feeling well", 1600);
+        dock_build_widgets();
+        break;
+    case PT_EV_CURED:
+        set_msg("Feeling better!", 1400);
+        s_mood = MOOD_HAPPY;
+        s_mood_until = now_ms() + 900;
+        break;
+    case PT_EV_MEDICINE_FAILED:
+        set_msg("Medicine didn't work", 1400);
+        break;
+    case PT_EV_CALL_EXPIRED:
+    case PT_EV_MISTAKE_SMALL:
+    case PT_EV_MISTAKE_BIG:
+        set_msg("Oops...", 1200);
+        break;
+    case PT_EV_REFUSED:
+        if (ev->a == PT_INTENT_GAME_RESULT) {
+            set_msg("Too sick to play", 1200);
+        } else {
+            set_msg("It refuses", 1000);
+        }
+        break;
+    case PT_EV_POOP:
+        set_msg("...", 800);
+        break;
+    case PT_EV_SOC_CANDIDATE:
+        set_msg("A visitor came by!", 1800);
+        if (s_dock_w[PET_ICON_MATE].box != NULL) {
+            bounce(s_dock_w[PET_ICON_MATE].box, DOCK_TILE_Y, -6, 180);
+        }
+        break;
+    case PT_EV_SOC_WEDDING:
+        set_msg("Just married!", 2200);
+        s_mood = MOOD_HAPPY;
+        s_mood_until = now_ms() + 2000;
+        bounce(s_creature, CREATURE_Y, -12, 300);
+        break;
+    case PT_EV_SOC_EGG_READY:
+        set_msg("An egg is on the way!", 2200);
+        s_mood = MOOD_HAPPY;
+        s_mood_until = now_ms() + 2000;
+        break;
+    case PT_EV_SOC_PARENTS_LEAVE:
+        set_msg("Your parents set off traveling", 2400);
+        break;
+    default:
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 主屏动作
+// ---------------------------------------------------------------------------
+
+static void toggle_lights(void)
+{
+    if (s_snap.stage < PT_STAGE_BABY) {
+        return;
+    }
+    if (s_snap.lights_off) {
+        pet_app_send_intent(PT_INTENT_LIGHTS_ON, 0);
+        set_msg("Lights on", 900);
+    } else {
+        pet_app_send_intent(PT_INTENT_LIGHTS_OFF, 0);
+        set_msg("Lights off", 900);
+    }
+    pet_audio_play(SND_CONFIRM);
+}
+
+static void activate_icon(pet_icon_t icon)
+{
+    switch (icon) {
+    case PET_ICON_FEED:
+        s_list_kind = LIST_FOOD;
+        s_list_sel = 0;
+        s_mode = MODE_LIST;
+        modal_open();
+        list_build();
+        pet_audio_play(SND_CONFIRM);
+        break;
+    case PET_ICON_CLEAN:
+        if (s_snap.poops > 0) {
+            pet_app_send_intent(PT_INTENT_CLEAN, 0);
+            pet_audio_play(SND_CLEAN);
+            set_msg("Clean!", 900);
+            bounce(s_creature, CREATURE_Y, -10, 220);
+        } else {
+            set_msg("Already clean", 900);
+        }
+        break;
+    case PET_ICON_STATUS:
+        s_status_page = 0;
+        s_mode = MODE_STATUS;
+        modal_open();
+        status_build();
+        pet_audio_play(SND_CONFIRM);
+        break;
+    case PET_ICON_LIGHTS:
+        toggle_lights();
+        break;
+    case PET_ICON_MED:
+        if (s_snap.sick) {
+            pet_app_send_intent(PT_INTENT_MEDICINE, 0);
+            pet_audio_play(SND_CONFIRM);
+            set_msg("Here you go", 900);
+        } else {
+            set_msg("Healthy", 900);
+        }
+        break;
+    case PET_ICON_GAME:
+        games_open();
+        break;
+    case PET_ICON_JOB:
+        job_office_open();
+        break;
+    case PET_ICON_MATE:
+        mate_open();
+        break;
+    case PET_ICON_DEX:
+        dex_open();
+        break;
+    case PET_ICON_PAT:
+        pet_app_send_intent(PT_INTENT_PAT, 0);
+        pet_audio_play(SND_CONFIRM);
+        s_mood = MOOD_HAPPY;
+        s_mood_until = now_ms() + 800;
+        bounce(s_creature, CREATURE_Y, -12, 260);
+        break;
+    case PET_ICON_SHOP:
+        shop_open();
+        break;
+    case PET_ICON_SETTINGS:
+        s_list_kind = LIST_SETTINGS;
+        s_list_sel = pet_app_volume();
+        s_mode = MODE_LIST;
+        modal_open();
+        list_build();
+        pet_audio_play(SND_CONFIRM);
+        break;
+    default:
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 按键分发（已持有 LVGL 锁）
+// ---------------------------------------------------------------------------
+
+// 组合键状态（designs 10 §1）：UP+OK 静音切换、DOWN+OK 状态摘要。
+// 三键同按 2 秒的度假模式依赖 P3 日历系统，P0 不接线。
+static bool s_up_held;
+static bool s_down_held;
+static bool s_up_chorded;
+static bool s_down_chorded;
+static int64_t s_up_chord_at;   // 和弦触发时刻(lv_tick ms)，用于过期残留 latch
+static int64_t s_down_chord_at;
+static uint8_t s_prev_volume = 2;
+
+static void open_status_summary(void)
+{
+    s_status_page = 0;
+    s_mode = MODE_STATUS;
+    modal_open();
+    status_build();
+}
+
+static void toggle_mute_chord(void)
+{
+    uint8_t vol = pet_app_volume();
+    if (vol == 0) {
+        pet_app_set_volume(s_prev_volume == 0 ? 2 : s_prev_volume);
+        set_msg("Sound on", 900);
+    } else {
+        s_prev_volume = vol;
+        pet_app_set_volume(0);
+        set_msg("Muted", 900);
+    }
+}
+
+static void handle_room(pet_ui_action_t act)
+{
+    switch (act) {
+    case PET_UI_ACT_PREV:
+        pet_dock_move(&s_dock, -1);
+        dock_refresh_selected();
+        break;
+    case PET_UI_ACT_NEXT:
+        pet_dock_move(&s_dock, 1);
+        dock_refresh_selected();
+        break;
+    case PET_UI_ACT_CONFIRM:
+        // 主屏短按 OK 先判组合键：UP+OK 静音 / DOWN+OK 状态摘要。
+        // 触发后立即清 held：共享 ADC 分压在和弦时会给方向键制造一次额外通断，
+        // 当这段"二次按住"长于短按窗(180ms)时 iot_button 会吞掉方向键终态点击
+        // （走 PRESS_END 而非 SINGLE/DOUBLE），若靠终态点击清 held 会永久卡死。
+        if (s_up_held) {
+            s_up_held = false;
+            s_up_chorded = true;
+            s_up_chord_at = now_ms();
+            toggle_mute_chord();
+            return;
+        }
+        if (s_down_held) {
+            s_down_held = false;
+            s_down_chorded = true;
+            s_down_chord_at = now_ms();
+            open_status_summary();
+            pet_audio_play(SND_CONFIRM);
+            return;
+        }
+        activate_icon(pet_dock_selected(&s_dock));
+        break;
+    case PET_UI_ACT_LIGHTS:
+        toggle_lights();
+        break;
+    case PET_UI_ACT_MENU:
+        s_status_page = 0;
+        s_mode = MODE_STATUS;
+        modal_open();
+        status_build();
+        break;
+    default:
+        break;
+    }
+}
+
+static void handle_list_key(pet_ui_action_t act)
+{
+    if (act == PET_UI_ACT_PREV) {
+        s_list_sel = (s_list_sel + s_list_count - 1) % s_list_count;
+        list_build();
+    } else if (act == PET_UI_ACT_NEXT) {
+        s_list_sel = (s_list_sel + 1) % s_list_count;
+        list_build();
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        if (s_list_kind == LIST_FOOD) {
+            pt_intent_kind_t intent;
+            if (s_snap.stage == PT_STAGE_BABY) {
+                intent = PT_INTENT_FEED_BOTTLE;
+            } else if (s_list_sel == 0) {
+                intent = PT_INTENT_FEED_MEAL;
+            } else {
+                intent = PT_INTENT_FEED_SNACK;
+            }
+            pet_app_send_intent(intent, 0);
+            pet_audio_play(SND_EAT);
+            s_mood = MOOD_EAT;
+            s_mood_until = now_ms() + 800;
+            bounce(s_creature, CREATURE_Y, -10, 220);
+            modal_close();
+        } else {
+            if (s_list_sel < 4) {
+                pet_app_set_volume((uint8_t) s_list_sel);
+            } else {
+                pet_app_set_quiet(s_list_sel == 4);
+            }
+            pet_audio_play(SND_CONFIRM);
+            set_msg("Saved", 800);
+            modal_close();
+        }
+    } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        pet_audio_play(SND_CANCEL);
+        modal_close();
+    }
+}
+
+static void handle_status_key(pet_ui_action_t act)
+{
+    if (act == PET_UI_ACT_PREV) {
+        s_status_page = (s_status_page + 2) % 3;
+        status_build();
+    } else if (act == PET_UI_ACT_NEXT || act == PET_UI_ACT_CONFIRM) {
+        s_status_page = (s_status_page + 1) % 3;
+        status_build();
+    } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        modal_close();
+    }
+}
+
+static void handle_key_locked(pet_btn_t btn, pet_ev_t ev)
+{
+    if (s_mode == MODE_MEMORIAL) {
+        if (btn == PET_BTN_OK && ev == PET_EV_CLICK) {
+            hide(s_memorial);
+            s_mode = MODE_ROOM;
+            s_have_prev = false;
+            s_checkin_prompted = false;
+            pet_app_new_game();
+            set_msg("A new egg...", 1500);
+            pet_audio_play(SND_CONFIRM);
+        }
+        return;
+    }
+    if (s_mode == MODE_OVERLAY) {
+        return;   // 进化/孵化演出锁输入
+    }
+    if (s_mode == MODE_GAME) {
+        if (ev == PET_EV_LONG && btn == PET_BTN_OK) {
+            // 二次长按确认退出，防误触。
+            if (now_ms() < s_g_exit_armed_until) {
+                game_exit();
+            } else {
+                s_g_exit_armed_until = now_ms() + 2000;
+                lv_label_set_text(s_game_hint, "Hold OK again to exit");
+            }
+            return;
+        }
+        if (ev == PET_EV_CLICK) {
+            game_key_click(btn);
+        }
+        return;
+    }
+    if (s_mode == MODE_GX) {
+        if (ev == PET_EV_LONG && btn == PET_BTN_OK) {
+            // 中途退出无任何收益（07 §2）；二次长按防误触。
+            if (now_ms() < s_gx_exit_armed_until) {
+                pet_audio_play(SND_CANCEL);
+                modal_close();
+            } else {
+                s_gx_exit_armed_until = now_ms() + 2000;
+                lv_label_set_text(s_gx_hint, "Hold OK again to exit");
+            }
+            return;
+        }
+        if (ev == PET_EV_CLICK) {
+            gx_click(btn);
+        }
+        return;
+    }
+
+    bool modal_open_flag = (s_mode == MODE_LIST || s_mode == MODE_STATUS
+                            || s_mode == MODE_SHOP || s_mode == MODE_DECOR
+                            || s_mode == MODE_CHECKIN
+                            || s_mode == MODE_GAMES
+                            || s_mode == MODE_JOB || s_mode == MODE_AGENCY
+                            || s_mode == MODE_MATE || s_mode == MODE_DEX);
+    pet_ui_action_t act = pet_input_map(btn, ev, modal_open_flag);
+    if (act == PET_UI_ACT_NONE) {
+        return;
+    }
+
+    switch (s_mode) {
+    case MODE_ROOM:
+        handle_room(act);
+        break;
+    case MODE_LIST:
+        handle_list_key(act);
+        break;
+    case MODE_STATUS:
+        handle_status_key(act);
+        break;
+    case MODE_SHOP:
+        handle_shop_key(act);
+        break;
+    case MODE_DECOR:
+        handle_style_key(act);
+        break;
+    case MODE_CHECKIN:
+        handle_checkin_key(act);
+        break;
+    case MODE_GAMES:
+        handle_games_key(act);
+        break;
+    case MODE_JOB:
+        handle_job_key(act);
+        break;
+    case MODE_AGENCY:
+        handle_agency_key(act);
+        break;
+    case MODE_MATE:
+        handle_mate_key(act);
+        break;
+    case MODE_DEX:
+        handle_dex_key(act);
+        break;
+    default:
+        break;
+    }
+}
+
+void pet_ui_button(pet_btn_t btn, pet_ev_t ev)
+{
+    // 组合键：记录方向键按住状态（designs 10 §1）。
+    // 和弦触发后 held 已立即清掉；chorded latch 只用来吞掉和弦瞬间方向键可能产生
+    // 的一次残留点击（约 300ms 内到达）。若那次终态事件被 iot_button 吞掉，latch 会
+    // 残留——靠这里：800ms 之后的新按压属于新手势，解除旧 latch，避免误吞一次导航。
+    if (ev == PET_EV_PRESS) {
+        const int64_t now = now_ms();
+        if (btn == PET_BTN_UP) {
+            if (s_up_chorded && now - s_up_chord_at > 800) s_up_chorded = false;
+            s_up_held = true;
+        } else if (btn == PET_BTN_DOWN) {
+            if (s_down_chorded && now - s_down_chord_at > 800) s_down_chorded = false;
+            s_down_held = true;
+        }
+        return;
+    }
+    if (btn == PET_BTN_UP) {
+        bool chorded = s_up_chorded;
+        s_up_held = false;
+        s_up_chorded = false;
+        if (chorded) {
+            return;   // 和弦已消费，吞掉松手时的 CLICK
+        }
+    } else if (btn == PET_BTN_DOWN) {
+        bool chorded = s_down_chorded;
+        s_down_held = false;
+        s_down_chorded = false;
+        if (chorded) {
+            return;
+        }
+    }
+    if (bsp_lvgl_lock(250)) {
+        handle_key_locked(btn, ev);
+        bsp_lvgl_unlock();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 定时刷新（LVGL 任务语境，已持锁）
+// ---------------------------------------------------------------------------
+
+// 05 §5.3：按各槽动画帧重合成画布。RGB565 无 alpha，底填仍取当前墙色；
+// 直接改外部缓冲后必须 lv_obj_invalidate 让 LVGL 重绘该区域。
+static void recompose_pet_canvas(void)
+{
+    if (s_pet_canvas_obj == NULL) {
+        return;
+    }
+    const pt_theme_def_t *td = pt_theme_def((pt_theme_t) s_dsnap.theme);
+    if (td == NULL) {
+        td = pt_theme_def(PT_THEME_COZY);
+    }
+    uint16_t wall565 = pt_rgb565_u32(td->wall);
+    pt_compose_pet(&s_snap.genome, s_pose, wall565, s_pet_canvas_px,
+                   &s_pet_art);
+    lv_obj_invalidate(s_pet_canvas_obj);
+}
+
+// 帧号语义见 assets/pet/manifest.json frame_notes：
+// body 0 静止 / 1 呼吸 / 2 跳跃；eyes 0 正常 / 1 眨眼 / 2 笑 / 3 睡 / 4 病；
+// face 0 正常 / 1 吃 / 2 哭（哭帧留给后续社交期，本切片不触发）。
+static void update_creature_mood(void)
+{
+    bool sleeping = s_snap.sleeping;
+    int mood = s_mood;
+    int64_t now = now_ms();
+    if (now > s_mood_until) {
+        mood = MOOD_NORMAL;
+    }
+
+    int want_row;
+    if (sleeping) {
+        want_row = 2;
+    } else if (s_snap.sick) {
+        want_row = 3;
+    } else if (now < s_blink_until || mood == MOOD_HAPPY) {
+        want_row = 1;
+    } else {
+        want_row = 0;
+    }
+    for (int row = 0; row < 4; row += 1) {
+        for (int i = 0; i < 2; i += 1) {
+            if (s_eye[row][i] != NULL) {
+                if (row == want_row) {
+                    show(s_eye[row][i]);
+                } else {
+                    hide(s_eye[row][i]);
+                }
+            }
+        }
+    }
+    if (s_zz != NULL) {
+        if (sleeping) {
+            show(s_zz);
+        } else {
+            hide(s_zz);
+        }
+    }
+    if (s_mouth[0] != NULL) {
+        bool eat = !sleeping && mood == MOOD_EAT;
+        if (eat) {
+            hide(s_mouth[0]);
+            show(s_mouth[1]);
+        } else {
+            show(s_mouth[0]);
+            hide(s_mouth[1]);
+        }
+    }
+
+    // 合成宠（非蛋/悼念页）：把同一套表情语义映射到各槽动画帧。
+    if (s_pet_canvas_obj != NULL) {
+        uint8_t want[PT_GENE_SLOT_COUNT];
+        memset(want, 0, sizeof(want));
+        if (sleeping) {
+            want[PT_GENE_SLOT_EYES] = 3;
+        } else if (s_snap.sick) {
+            want[PT_GENE_SLOT_EYES] = 4;
+        } else if (now < s_blink_until) {
+            want[PT_GENE_SLOT_EYES] = 1;
+        } else if (mood == MOOD_HAPPY) {
+            want[PT_GENE_SLOT_EYES] = 2;
+            want[PT_GENE_SLOT_BODY] = 2;
+        } else if (mood == MOOD_EAT) {
+            want[PT_GENE_SLOT_FACE] = 1;
+        }
+        // 待机呼吸：约每 3.6 秒有 0.4 秒身体 +1px（睡眠/跳跃/进食时不叠加）。
+        if (!sleeping && want[PT_GENE_SLOT_BODY] == 0
+            && (now % 3600) < 400) {
+            want[PT_GENE_SLOT_BODY] = 1;
+        }
+        if (s_pose_dirty
+            || memcmp(want, s_pose, sizeof(want)) != 0) {
+            memcpy(s_pose, want, sizeof(want));
+            s_pose_dirty = false;
+            recompose_pet_canvas();
+        }
+    }
+}
+
+static void update_effect(void)
+{
+    int64_t elapsed = now_ms() - s_eff_t0;
+    int32_t reveal = (s_eff_kind == EFF_HATCH) ? 350 : 1000;
+    int32_t finish = (s_eff_kind == EFF_HATCH) ? 900 : 2100;
+
+    if (!s_eff_rebuilt && elapsed >= reveal) {
+        s_eff_rebuilt = true;
+        build_creature();
+        dock_build_widgets();
+        dock_refresh_selected();
+        bounce(s_creature, CREATURE_Y, -14, 320);
+        lv_obj_set_style_bg_opa(s_eff_cont, LV_OPA_TRANSP, 0);
+        lv_label_set_text(s_eff_txt, "");
+        if (s_eff_kind == EFF_EVOLVE) {
+            set_msg(species_name(s_snap.species), 1800);
+        } else {
+            set_msg("Hello!", 1200);
+        }
+    }
+    if (elapsed >= finish) {
+        hide(s_eff_cont);
+        s_eff_kind = EFF_NONE;
+        s_mode = MODE_ROOM;
+    }
+}
+
+static void refresh(lv_timer_t *timer)
+{
+    (void) timer;
+    int64_t t = now_ms();
+
+
+    if (!pet_app_snapshot(&s_snap)) {
+        return;
+    }
+
+    // 先吃引擎事件（演出/纪念可能改模式）。
+    pt_event_t ev;
+    while (pet_app_take_event(&ev)) {
+        on_app_event(&ev);
+    }
+
+    if (!pet_app_econ_snapshot(&s_esnap)) {
+        return;
+    }
+    // P2-S3a：社交面板打开时每帧跟随引擎裁决（关系值/扣款/相位变化后重建）。
+    if (s_mode == MODE_MATE) {
+        pt_social_t next;
+        if (pet_app_social_snapshot(&next)) {
+            pt_soc_phase_t old_phase = s_ssnap.phase;
+            if (!s_have_ssnap || memcmp(&next, &s_ssnap, sizeof(next)) != 0) {
+                s_ssnap = next;
+                s_have_ssnap = true;
+                // S3b：迎接新蛋执行成功（EGG_READY → SINGLE，主状态回蛋期）。
+                if (old_phase == PT_SOC_EGG_READY
+                    && next.phase == PT_SOC_SINGLE) {
+                    modal_close();
+                    set_msg("A new egg!", 1800);
+                } else {
+                    mate_build();
+                }
+            }
+        }
+    }
+    {
+        uint8_t rv;
+        if (pet_app_take_soc_result(&rv)) {
+            if (rv != PT_SOC_OK) {
+                set_msg(mate_soc_msg(rv), 1200);
+            }
+        }
+    }
+    // 购买/使用后引擎任务已落账，下一帧重建商店行（钱包/库存/次数）。
+    if (s_mode == MODE_SHOP && s_shop_dirty) {
+        s_shop_dirty = false;
+        shop_build();
+    }
+    if (!pet_app_decor_snapshot(&s_dsnap)) {
+        return;
+    }
+    // S5：月初津贴等到账提示。
+    {
+        char note[40];
+        if (pet_app_take_notice(note, sizeof(note))) {
+            set_msg(note, 1800);
+        }
+    }
+    if (s_mode == MODE_DECOR && s_dec_dirty) {
+        s_dec_dirty = false;
+        style_build();
+    }
+    // 装饰变化 → 房间底色 / 家具标记 / 身上穿戴（收藏操作不常见，全量重建即可）。
+    bool decor_changed = !s_have_dprev
+                         || memcmp(&s_dprev, &s_dsnap, sizeof(s_dsnap)) != 0;
+    if (decor_changed) {
+        if (!s_have_dprev || s_dprev.theme != s_dsnap.theme) {
+            apply_room_theme();
+            // 合成画布以墙色为底，主题换色后必须重算；蛋期重建仅重开晃动动画，无害。
+            build_creature();
+        }
+        if (!s_have_dprev || s_dprev.placed != s_dsnap.placed) {
+            build_furniture();
+        }
+        if (!s_have_dprev
+            || memcmp(s_dprev.worn, s_dsnap.worn, sizeof(s_dsnap.worn)) != 0) {
+            build_creature();
+        }
+        s_dprev = s_dsnap;
+        s_have_dprev = true;
+    }
+
+
+    // 时钟与电量
+    int32_t mod = s_snap.minute % 1440;
+    if (mod < 0) {
+        mod += 1440;
+    }
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%02d:%02d", (int) (mod / 60), (int) (mod % 60));
+    lv_label_set_text(s_clock, buf);
+
+    s_battery_div += 1;
+    if (s_battery_div >= 8) {
+        s_battery_div = 0;
+        s_battery_cache = bsp_battery_soc();
+    }
+    if (s_battery_cache < 0) {
+        // 电量计不可用（模拟器无 CW2017）：隐藏电池文本，顶栏右侧留白。
+        hide(s_battery);
+    } else {
+        show(s_battery);
+        snprintf(buf, sizeof(buf), "%d%%", s_battery_cache);
+        lv_label_set_text(s_battery, buf);
+        lv_obj_set_style_text_color(s_battery,
+            s_battery_cache < 20 ? lv_color_hex(COL_RED) : lv_color_hex(COL_INK), 0);
+    }
+
+    if (s_mode == MODE_OVERLAY) {
+        update_effect();
+        return;
+    }
+    if (s_mode == MODE_MEMORIAL) {
+        return;
+    }
+
+    // 冷启动即处于死亡态：直接落纪念页。
+    if (s_snap.stage == PT_STAGE_DEAD && s_have_prev) {
+        memorial_open();
+        return;
+    }
+
+    // 每日首次开机签到：进入幼儿期后每天自动弹一次；错过可在商店首页补领。
+    if (!s_checkin_prompted && s_mode == MODE_ROOM
+        && s_snap.stage >= PT_STAGE_CHILD
+        && pt_econ_can_checkin(&s_esnap, s_snap.day_id)) {
+        s_checkin_prompted = true;
+        checkin_open();
+    }
+
+    bool stage_changed = !s_have_prev || s_prev.stage != s_snap.stage;
+    bool species_changed = !s_have_prev || s_prev.species != s_snap.species;
+    if (stage_changed || species_changed) {
+        build_creature();
+    }
+    if (stage_changed) {
+        dock_build_widgets();
+    }
+
+    // 顶栏阶段/年龄胶囊
+    snprintf(buf, sizeof(buf), "%s D%d", stage_name(s_snap.stage),
+             (int) s_snap.age_days);
+    lv_label_set_text(s_top_stage, buf);
+
+    // 四心计量：0..100 映射 0..4 心，阈值 12/37/62/87（每 25 一档）。
+    // 仅在心数变化时换图，避免每次刷新都让 8 个图片对象失效重绘。
+    static int8_t s_heart_full_cache[4] = { [0 ... 3] = -1 };
+    static int8_t s_heart_fun_cache[4] = { [0 ... 3] = -1 };
+    for (int i = 0; i < 4; i += 1) {
+        int8_t f = s_snap.fullness >= 12 + i * 25 ? 1 : 0;
+        int8_t h = s_snap.happiness >= 12 + i * 25 ? 1 : 0;
+        if (s_heart_full_cache[i] != f) {
+            s_heart_full_cache[i] = f;
+            lv_image_set_src(s_heart_full[i], pet_ui_small_dsc(
+                f ? PET_UI_SMALL_HEART_GREEN : PET_UI_SMALL_HEART_EMPTY));
+        }
+        if (s_heart_fun_cache[i] != h) {
+            s_heart_fun_cache[i] = h;
+            lv_image_set_src(s_heart_fun[i], pet_ui_small_dsc(
+                h ? PET_UI_SMALL_HEART_YELLOW : PET_UI_SMALL_HEART_EMPTY));
+        }
+    }
+
+    // 体重胶囊（生病时变红字 SICK；便便/呼叫/睡眠在房间内另有表现）
+    if (s_snap.sick) {
+        lv_label_set_text(s_weight_lbl, "SICK");
+        lv_obj_set_style_text_color(s_weight_lbl, lv_color_hex(COL_RED), 0);
+    } else {
+        snprintf(buf, sizeof(buf), "%dg", (int) s_snap.weight);
+        lv_label_set_text(s_weight_lbl, buf);
+        lv_obj_set_style_text_color(s_weight_lbl, lv_color_hex(COL_INK), 0);
+    }
+    snprintf(buf, sizeof(buf), "%d", (int) s_snap.bond);
+    lv_label_set_text(s_bond_lbl, buf);
+
+    // 顶栏日月：关灯后为月亮
+    lv_image_set_src(s_celestial, pet_ui_small_dsc(
+        s_snap.lights_off ? PET_UI_SMALL_MOON : PET_UI_SMALL_SUN));
+
+    // 便便
+    if (!s_have_prev || s_prev.poops != s_snap.poops) {
+        build_poops();
+    }
+
+
+    // 呼叫气泡：无限浮动动画只在气泡首次出现时建一次，不能每个刷新周期删了
+    // 重建——那会让动画系统持续产生失效区。
+    bool bubble_wanted = s_snap.active_call != PT_CALL_NONE && !s_snap.sleeping
+                         && s_snap.stage != PT_STAGE_EGG;
+    if (bubble_wanted) {
+        lv_label_set_text(s_bubble_txt, call_text(s_snap.active_call));
+        // 复位基准位（上次动画被删时 y 可能停在中途），再浮动。
+        lv_obj_set_pos(s_bubble, 146, 36);
+        show(s_bubble);
+        if (!s_bubble_anim_on) {
+            s_bubble_anim_on = true;
+            lv_anim_t a;
+            lv_anim_init(&a);
+            lv_anim_set_var(&a, s_bubble);
+            lv_anim_set_values(&a, 36, 31);
+            lv_anim_set_duration(&a, 450);
+            lv_anim_set_playback_duration(&a, 450);
+            lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+            lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t) lv_obj_set_y);
+            lv_anim_start(&a);
+        }
+    } else {
+        if (s_bubble_anim_on) {
+            s_bubble_anim_on = false;
+            lv_anim_delete(s_bubble, NULL);
+        }
+        hide(s_bubble);
+    }
+
+    // 关灯后的夜罩
+    if (s_snap.lights_off) {
+        show(s_night);
+    } else {
+        hide(s_night);
+    }
+
+    update_creature_mood();
+    dock_refresh_selected();
+
+
+    // 眨眼节奏
+    if (t >= s_next_blink) {
+        s_blink_until = t + 220;
+        s_next_blink = t + 2800 + (t % 1700);
+    }
+
+    // 情境说明胶囊：仅在弹层/子模式或临时消息时出现，纯坞位浏览时隐藏。
+    const char *caption = NULL;
+    if (t < s_msg_until) {
+        caption = s_msg;
+    } else if (s_mode == MODE_GAME) {
+        caption = "High-Low";
+    } else if (s_mode == MODE_GAMES) {
+        caption = "Games";
+    } else if (s_mode == MODE_JOB) {
+        caption = "Work";
+    } else if (s_mode == MODE_AGENCY) {
+        caption = "Agency";
+    } else if (s_mode == MODE_GX) {
+        caption = GAMES_NAME[s_gx_id];
+    } else if (s_mode == MODE_SHOP) {
+        caption = s_shop_bag ? "Bag" : "Shop";
+    } else if (s_mode == MODE_DECOR) {
+        caption = "Style";
+    } else if (s_mode == MODE_CHECKIN) {
+        caption = "Daily bonus";
+    }
+    if (caption != NULL) {
+        lv_label_set_text(s_caption_txt, caption);
+        show(s_caption);
+    } else {
+        hide(s_caption);
+    }
+
+    // 游戏退出二次确认超时
+    if (s_mode == MODE_GAME && s_g_exit_armed_until != 0
+        && t >= s_g_exit_armed_until) {
+        s_g_exit_armed_until = 0;
+        lv_label_set_text(s_game_hint, "UP/DOWN choose  OK deal");
+    }
+    if (s_mode == MODE_GX) {
+        if (s_gx_exit_armed_until != 0 && t >= s_gx_exit_armed_until) {
+            s_gx_exit_armed_until = 0;
+            lv_label_set_text(s_gx_hint, gx_hint_text());
+        }
+        gx_refresh(t);
+    }
+
+    s_prev = s_snap;
+    s_have_prev = true;
+}
+
+// ---------------------------------------------------------------------------
+// 初始化：唯一主屏
+// ---------------------------------------------------------------------------
+
+void pet_ui_init(void)
+{
+    s_scr = lv_obj_create(NULL);
+    lv_obj_remove_flag(s_scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_scr, lv_color_hex(COL_BG), 0);
+    lv_obj_set_style_bg_opa(s_scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_scr, 0, 0);
+    lv_obj_set_style_pad_all(s_scr, 0, 0);
+
+    // 顶栏（奶油带 0..26）
+    rect(s_scr, 0, 0, LCD_W, 26, 0, COL_CREAM);
+    lv_obj_t *hair = rect(s_scr, 0, 25, LCD_W, 1, 0, COL_INK);
+    lv_obj_set_style_bg_opa(hair, LV_OPA_20, 0);
+    lv_obj_t *stage_pill = rect(s_scr, 6, 4, 66, 18, 9, COL_PILL_PINK);
+    border(stage_pill, COL_INK, 1);
+    s_top_stage = lv_label_create(stage_pill);
+    lv_obj_set_style_text_font(s_top_stage, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_top_stage, lv_color_hex(COL_INK), 0);
+    lv_label_set_text(s_top_stage, "EGG");
+    lv_obj_center(s_top_stage);
+    s_celestial = icon_img(s_scr, 128, 7, pet_ui_small_dsc(PET_UI_SMALL_SUN));
+    s_clock = label(s_scr, 142, 5, 54, &lv_font_montserrat_12, COL_INK, "08:00");
+    s_battery = label(s_scr, 196, 5, 40, &lv_font_montserrat_12, COL_INK, "--");
+    lv_obj_set_style_text_align(s_battery, LV_TEXT_ALIGN_RIGHT, 0);
+    hide(s_battery);   // 电量计可读后由刷新逻辑显示
+
+    // 房间（26..252）：墙 + 地板 + 地毯落影 + 贴花
+    s_room = rect(s_scr, 0, 26, LCD_W, 226, 0, COL_ROOM);
+    s_wall_top = rect(s_room, 0, 0, LCD_W, 186, 0, COL_ROOM_TOP);
+    s_floor_obj = rect(s_room, 0, 186, LCD_W, 40, 0, COL_FLOOR);
+    s_floor_edge = rect(s_room, 0, 186, LCD_W, 2, 0, COL_FLOOR_EDGE);
+    lv_obj_t *rug = rect(s_room, 64, 182, 112, 16, 8, COL_RUG);
+    lv_obj_set_style_border_width(rug, 0, 0);
+    lv_obj_t *shadow = rect(s_room, 80, 182, 80, 12, 6, COL_SHADOW);
+    lv_obj_set_style_border_width(shadow, 0, 0);
+    lv_obj_set_style_bg_opa(shadow, 140, 0);
+    // 太阳/盆栽贴花（夜罩盖上后随墙一起消失）
+    icon_img(s_room, 191, 9, pet_ui_deco_dsc(PET_UI_DECO_SUN));
+    icon_img(s_room, 13, 165, pet_ui_deco_dsc(PET_UI_DECO_PLANT));
+
+    // S4 家具标记层（在宠物之下）
+    s_furn_layer = lv_obj_create(s_room);
+    lv_obj_remove_flag(s_furn_layer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_furn_layer, 0, 0);
+    lv_obj_set_size(s_furn_layer, LCD_W, 226);
+    lv_obj_set_style_bg_opa(s_furn_layer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_furn_layer, 0, 0);
+    lv_obj_set_style_pad_all(s_furn_layer, 0, 0);
+
+    // S4 星空主题点缀（固定位置，仅 Starry 主题显示）
+    static const int8_t star_xy[6][2] = {
+        { 24, 26 }, { 70, 16 }, { 120, 30 },
+        { 168, 14 }, { 206, 40 }, { 150, 64 },
+    };
+    for (int i = 0; i < 6; i += 1) {
+        s_star[i] = rect(s_room, star_xy[i][0], star_xy[i][1], 3, 3, 1,
+                         0xFFE97A);
+        hide(s_star[i]);
+    }
+
+    s_creature = lv_obj_create(s_room);
+    lv_obj_remove_flag(s_creature, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_creature, CREATURE_X, CREATURE_Y);
+    lv_obj_set_size(s_creature, 120, 112);
+    lv_obj_set_style_bg_opa(s_creature, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_creature, 0, 0);
+    lv_obj_set_style_pad_all(s_creature, 0, 0);
+    // P2-S2：128x128 合成画布比 120x112 容器略大并负偏移居中，允许子对象越界绘制
+    // （画布仍完全落在 s_room 范围内，不会被更外层裁掉）。
+    lv_obj_add_flag(s_creature, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+
+    s_bubble = lv_obj_create(s_room);
+    lv_obj_remove_flag(s_bubble, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_bubble, 146, 36);
+    lv_obj_set_size(s_bubble, 32, 32);
+    lv_obj_set_style_radius(s_bubble, 16, 0);
+    lv_obj_set_style_bg_color(s_bubble, lv_color_hex(0xFFE97A), 0);
+    lv_obj_set_style_bg_opa(s_bubble, LV_OPA_COVER, 0);
+    border(s_bubble, 0xD9B53A, 2);
+    lv_obj_set_style_pad_all(s_bubble, 0, 0);
+    s_bubble_txt = label(s_bubble, 0, 4, 32, &lv_font_montserrat_20, COL_INK, "!");
+    hide(s_bubble);
+
+    s_poops = lv_obj_create(s_room);
+    lv_obj_remove_flag(s_poops, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_poops, 0, 180);
+    lv_obj_set_size(s_poops, LCD_W, 34);
+    lv_obj_set_style_bg_opa(s_poops, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_poops, 0, 0);
+    lv_obj_set_style_pad_all(s_poops, 0, 0);
+
+    s_night = rect(s_room, 0, 0, LCD_W, 226, 0, 0x101028);
+    // 不透明黑屏（不用 alpha：整屏合成在模拟器软件渲染下会触发 WDT；
+    // 原拓麻歌子关灯也是整屏变黑）。奶油顶栏在罩层之外，日月切成月亮。
+    lv_obj_set_style_bg_opa(s_night, LV_OPA_COVER, 0);
+    hide(s_night);
+
+    // 情境提示胶囊（地板下缘居中，仅子模式/临时消息可见）
+    s_caption = rect(s_scr, 60, 236, 120, 16, 8, COL_CREAM);
+    border(s_caption, COL_INK, 1);
+    s_caption_txt = lv_label_create(s_caption);
+    lv_obj_set_style_text_font(s_caption_txt, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_caption_txt, lv_color_hex(COL_INK), 0);
+    lv_obj_center(s_caption_txt);
+    hide(s_caption);
+
+    // 微状态行（奶油带 252..276）
+    rect(s_scr, 0, 252, LCD_W, 24, 0, COL_CREAM);
+    icon_img(s_scr, 10, 258, pet_ui_small_dsc(PET_UI_SMALL_BOWL));
+    for (int i = 0; i < 4; i += 1) {
+        s_heart_full[i] = icon_img(s_scr, 23 + i * 12, 258,
+                                   pet_ui_small_dsc(PET_UI_SMALL_HEART_EMPTY));
+    }
+    icon_img(s_scr, 86, 258, pet_ui_small_dsc(PET_UI_SMALL_SMILE));
+    for (int i = 0; i < 4; i += 1) {
+        s_heart_fun[i] = icon_img(s_scr, 103 + i * 12, 258,
+                                  pet_ui_small_dsc(PET_UI_SMALL_HEART_EMPTY));
+    }
+    lv_obj_t *weight_pill = rect(s_scr, 158, 257, 34, 14, 7, COL_PILL_BLUE);
+    border(weight_pill, COL_INK, 1);
+    s_weight_lbl = lv_label_create(weight_pill);
+    lv_obj_set_style_text_font(s_weight_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_weight_lbl, lv_color_hex(COL_INK), 0);
+    lv_label_set_text(s_weight_lbl, "0g");
+    lv_obj_center(s_weight_lbl);
+    icon_img(s_scr, 202, 258, pet_ui_small_dsc(PET_UI_SMALL_HEART_PINK));
+    s_bond_lbl = label(s_scr, 214, 258, 22, &lv_font_montserrat_12, COL_INK, "0");
+
+    // 坞带（276..320）
+    rect(s_scr, 0, 276, LCD_W, 44, 0, COL_DOCK_BAND);
+    rect(s_scr, 0, 276, LCD_W, 2, 0, COL_DOCK_EDGE);
+    s_dockbox = lv_obj_create(s_scr);
+    lv_obj_remove_flag(s_dockbox, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_dockbox, 0, 276);
+    lv_obj_set_size(s_dockbox, LCD_W, 44);
+    lv_obj_set_style_bg_opa(s_dockbox, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_dockbox, 0, 0);
+    lv_obj_set_style_pad_all(s_dockbox, 0, 0);
+
+    // 通用弹层：整面不透明（原拓麻歌子式整屏切换）。不用全屏半透明遮罩——
+    // 整屏 alpha 合成在模拟器软件渲染下会耗尽 CPU，真机上也无必要。
+    s_modal = lv_obj_create(s_scr);
+    lv_obj_remove_flag(s_modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_modal, 0, 0);
+    lv_obj_set_size(s_modal, LCD_W, LCD_H);
+    lv_obj_set_style_bg_color(s_modal, lv_color_hex(COL_ROOM_TOP), 0);
+    lv_obj_set_style_bg_opa(s_modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_modal, 0, 0);
+    lv_obj_set_style_border_width(s_modal, 0, 0);
+    lv_obj_set_style_pad_all(s_modal, 0, 0);
+    lv_obj_t *panel = rect(s_modal, 16, 40, 208, 240, 16, COL_PANEL);
+    border(panel, COL_DIM, 2);
+    s_modal_title = label(panel, 0, 10, 208, &lv_font_montserrat_20, COL_INK, "");
+    s_modal_body = lv_obj_create(panel);
+    lv_obj_remove_flag(s_modal_body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_modal_body, 8, 44);
+    lv_obj_set_size(s_modal_body, 192, 188);
+    lv_obj_set_style_bg_opa(s_modal_body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_modal_body, 0, 0);
+    lv_obj_set_style_pad_all(s_modal_body, 0, 0);
+    hide(s_modal);
+
+    // 孵化/进化白光演出
+    s_eff_cont = lv_obj_create(s_scr);
+    lv_obj_remove_flag(s_eff_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_eff_cont, 0, 0);
+    lv_obj_set_size(s_eff_cont, LCD_W, LCD_H);
+    lv_obj_set_style_radius(s_eff_cont, 0, 0);
+    lv_obj_set_style_bg_color(s_eff_cont, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_opa(s_eff_cont, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_eff_cont, 0, 0);
+    lv_obj_set_style_pad_all(s_eff_cont, 0, 0);
+    s_eff_txt = label(s_eff_cont, 0, 140, LCD_W, &lv_font_montserrat_20,
+                      COL_INK, "?");
+    hide(s_eff_cont);
+
+    // 死亡纪念
+    s_memorial = lv_obj_create(s_scr);
+    lv_obj_remove_flag(s_memorial, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_memorial, 0, 0);
+    lv_obj_set_size(s_memorial, LCD_W, LCD_H);
+    lv_obj_set_style_radius(s_memorial, 0, 0);
+    lv_obj_set_style_bg_color(s_memorial, lv_color_hex(0x201A2E), 0);
+    lv_obj_set_style_bg_opa(s_memorial, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_memorial, 0, 0);
+    lv_obj_set_style_pad_all(s_memorial, 0, 0);
+    label(s_memorial, 0, 60, LCD_W, &lv_font_montserrat_14, 0x9C8FB0,
+          "In memory of");
+    // 名字与年龄行在事件时回填（固定对象，避免重复创建）。
+    s_memorial_name = label(s_memorial, 0, 88, LCD_W,
+                            &lv_font_montserrat_20, 0xF0E6D8, "");
+    s_memorial_line = label(s_memorial, 0, 128, LCD_W,
+                            &lv_font_montserrat_14, 0xC9BBDD, "");
+    s_memorial_tier = label(s_memorial, 0, 156, LCD_W,
+                            &lv_font_montserrat_14, 0x9C8FB0, "");
+    label(s_memorial, 0, 180, LCD_W, &lv_font_montserrat_20, 0xF0E6D8, "R.I.P.");
+    label(s_memorial, 0, 240, LCD_W, &lv_font_montserrat_14, 0x9C8FB0,
+          "OK: new egg");
+    hide(s_memorial);
+
+    // 先拿一帧状态再开定时器，避免首帧空画。
+    pet_app_snapshot(&s_snap);
+    pet_app_decor_snapshot(&s_dsnap);
+    s_have_dprev = false;
+    apply_room_theme();
+    build_creature();
+    build_poops();
+    build_furniture();
+    s_dprev = s_dsnap;
+    s_have_dprev = true;
+    dock_build_widgets();
+    dock_refresh_selected();
+    s_prev = s_snap;
+    s_have_prev = true;
+    s_next_blink = now_ms() + 2500;
+
+    s_timer = lv_timer_create(refresh, 200, NULL);
+    lv_screen_load(s_scr);
+}
+

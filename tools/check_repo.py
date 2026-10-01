@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -218,6 +219,19 @@ def check_document_languages(
         text = path.read_text(encoding="utf-8")
         opening = "\n".join(text.splitlines()[:8])
 
+        # A symlinked Markdown alias (e.g. CLAUDE.md -> AGENTS.md) inherits the
+        # language link of its target: the opening may reference either the
+        # alias's own peer name or the resolved target's peer name.
+        link_tokens = {name[:-3] + ".zh_CN.md"} if name.endswith(".md") else set()
+        if path.is_symlink():
+            target_name = os.path.basename(os.readlink(path))
+            if target_name.endswith(".zh_CN.md"):
+                link_tokens.add(target_name)
+                link_tokens.add(target_name[: -len(".zh_CN.md")] + ".md")
+            elif target_name.endswith(".md"):
+                link_tokens.add(target_name)
+                link_tokens.add(target_name[:-3] + ".zh_CN.md")
+
         if name.endswith(".zh_CN.md"):
             default_name = f"{name[:-len('.zh_CN.md')]}.md"
             default_path = path.with_name(default_name)
@@ -225,7 +239,7 @@ def check_document_languages(
                 errors.append(
                     f"{path.relative_to(ROOT)}: missing English default {default_name}"
                 )
-            elif default_name not in opening:
+            elif not any(token in opening for token in (default_name, *link_tokens)):
                 errors.append(
                     f"{path.relative_to(ROOT)}: missing top language link to {default_name}"
                 )
@@ -237,7 +251,7 @@ def check_document_languages(
             errors.append(
                 f"{path.relative_to(ROOT)}: missing Simplified Chinese peer {chinese_name}"
             )
-        elif chinese_name not in opening:
+        elif not any(token in opening for token in (chinese_name, *link_tokens)):
             errors.append(
                 f"{path.relative_to(ROOT)}: missing top language link to {chinese_name}"
             )

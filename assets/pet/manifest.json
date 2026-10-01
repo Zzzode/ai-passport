@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "description": "PasPet L2 part art. Grayscale 8-bit PNGs: pixel value 0 = transparent, 1..255 = shade ramp (low = outline, high = belly highlight). Layer content is authored inside the 64x64 grid; runtime blits x2 onto a 128x128 canvas, so all layers share one anchor. Per-part frames live in parts/<slot>/<NN>/<frame>.png; f0 is the resting pose and extra frames animate per designs 05 §5.3.",
+  "part_grid": 64,
+  "canvas": 128,
+  "frames": { "body": 3, "eyes": 5, "face": 3, "head": 1, "back": 1 },
+  "frame_notes": {
+    "body": "0 idle, 1 breath (+1y), 2 happy jump (-3y)",
+    "eyes": "0 variant normal, 1 blink, 2 happy arcs, 3 sleep arcs, 4 sick plus",
+    "face": "0 variant normal, 1 eating open mouth, 2 crying",
+    "head": "0 single frame",
+    "back": "0 single frame"
+  },
+  "budget_bytes": 1258291,
+  "slots": [
+    { "name": "body",  "genome_slot": 0, "count": 8 },
+    { "name": "eyes",  "genome_slot": 1, "count": 12 },
+    { "name": "face",  "genome_slot": 2, "count": 8 },
+    { "name": "head",  "genome_slot": 3, "count": 12 },
+    { "name": "back",  "genome_slot": 5, "count": 8 }
+  ],
+  "draw_order": ["back", "body", "face", "eyes", "head"],
+  "shade_bands": { "outline_max": 48, "fill_max": 192, "highlight_max": 255 }
+}
