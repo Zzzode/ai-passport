@@ -312,6 +312,11 @@ static lv_obj_t *s_sfooter;
 static lv_obj_t *s_sf_prev;
 static lv_obj_t *s_sf_tab[3];
 static lv_obj_t *s_sf_next;
+// PV2 batch4 DEX 专用页脚：‹ ALBUM PARTS BADGES ›（与其它页脚互斥）。
+static lv_obj_t *s_dfooter;
+static lv_obj_t *s_df_prev;
+static lv_obj_t *s_df_tab[3];
+static lv_obj_t *s_df_next;
 static lv_obj_t *s_mback;
 static lv_obj_t *s_toast_box;
 static lv_obj_t *s_toast_msg;
@@ -862,6 +867,7 @@ static void frame_legacy(void)
     hide(s_mp_next);
     hide(s_mfooter);
     hide(s_sfooter);
+    hide(s_dfooter);
     hide(s_mback);
     hide(s_toast_box);
     if (s_toast_timer != NULL) {
@@ -882,6 +888,7 @@ static void frame_pv2(bool with_footer)
         hide(s_mfooter);
     }
     hide(s_sfooter);
+    hide(s_dfooter);
     hide(s_mcoin);
     // SOUND 会把页码挪到页眉居中；回到其它弹层时复位。
     lv_obj_set_pos(s_mp_cur, 66, 15);
@@ -891,15 +898,20 @@ static void frame_pv2(bool with_footer)
     hide(s_toast_box);
 }
 
-// Montserrat 12 ASCII 文本像素宽（不走 lv_text 可变参数 API）。
-static int32_t text_w12(const char *s)
+// Montserrat ASCII 文本像素宽（不走 lv_text 可变参数 API）。
+static int32_t text_wf(const lv_font_t *font, const char *s)
 {
     int32_t w = 0;
     for (size_t i = 0; s[i] != '\0'; i += 1) {
-        w += lv_font_get_glyph_width(&lv_font_montserrat_12,
-                                     (uint32_t) s[i], (uint32_t) s[i + 1]);
+        w += lv_font_get_glyph_width(font, (uint32_t) s[i],
+                                     (uint32_t) s[i + 1]);
     }
     return w;
+}
+
+static int32_t text_w12(const char *s)
+{
+    return text_wf(&lv_font_montserrat_12, s);
 }
 
 static lv_obj_t *llabel(lv_obj_t *parent, int32_t x, int32_t y, int32_t w,
@@ -1460,6 +1472,7 @@ static void status_build(void)
     show(s_mback);
     hide(s_mfooter);
     show(s_sfooter);
+    hide(s_dfooter);
     hide(s_mcoin);
     hide(s_mp_prev);
     hide(s_mp_cur);
@@ -2686,19 +2699,21 @@ static void handle_mate_key(pet_ui_action_t act)
 }
 
 // ---------------------------------------------------------------------------
-// P2-S4 图鉴面板（04 §8.3 物种 / 05 §8 部件与纯血）
-// 三标签：物种卡（3 页）→ 部件浏览器（按槽 64 件）→ 徽章。
-// OK 在页脚按钮间推进/循环标签，BACK 关闭；页面内 UP/DOWN 翻页或移动光标。
+// P2-S4 图鉴面板（PV2 batch4，定稿 pv2-dex.html）
+// 统一页脚 ‹ ALBUM PARTS BADGES ›：ALBUM 物种卡 3 页 / PARTS 64 件浏览器
+// （8 格与页脚连成单环，‹ › = 全局游标 ±8）/ BADGES 2 页。BACK 关闭。
 // ---------------------------------------------------------------------------
 
 static pt_dex_t s_dex_snap;
-static int s_dex_tab;        // 0=物种 1=部件 2=徽章
-static int s_dex_page;       // 物种/徽章页
-static int s_dex_cursor;     // 部件全局位索引 0..total-1
-static int s_dex_focus;      // 部件页：0=格子 1=切标签按钮 2=Back
-static lv_obj_t *s_dex_sel_box;
+static int s_dex_tab;        // 0=ALBUM 1=PARTS 2=BADGES
+static int s_dex_page;       // ALBUM 0..2 / BADGES 0..1
+static int s_dex_cursor;     // PARTS 全局面位索引 0..63
+static int s_dex_sel;        // 当前页焦点环索引（-1=由 builder 归位到当前档）
 
 enum { DEX_TAB_SPECIES = 0, DEX_TAB_PARTS, DEX_TAB_BADGES };
+
+// PARTS 当前页部件格（最多 8）。
+static lv_obj_t *s_dex_cell[8];
 
 static const char *dex_slot_name(pt_gene_slot_t s)
 {
@@ -2716,11 +2731,10 @@ static const char *dex_slot_name(pt_gene_slot_t s)
 static const char *dex_rarity_letter(pt_rarity_t r)
 {
     switch (r) {
-    case PT_RAR_C: return "C";
     case PT_RAR_U: return "U";
     case PT_RAR_R: return "R";
     case PT_RAR_L: return "L";
-    default:       return "?";
+    default:       return "C";
     }
 }
 
@@ -2730,33 +2744,27 @@ static uint32_t dex_rarity_color(pt_rarity_t r)
     case PT_RAR_U: return COL_BLUE;
     case PT_RAR_R: return 0xB06FC9;
     case PT_RAR_L: return COL_YELLOW;
-    default:       return COL_DIM;
+    default:       return COL_INK;
     }
 }
 
+// 锁定提示（Montserrat 12，卡内可用宽约 140px：文案 <= 20 字符）。
 static const char *dex_locked_hint(pt_species_t sp)
 {
     switch (sp) {
-    case PT_SP_TEEN_A:        return "Tidy teen (good care)";
+    case PT_SP_TEEN_A:        return "Good-care teen";
     case PT_SP_TEEN_B:        return "Easygoing teen";
-    case PT_SP_TEEN_C:        return "Scrappy teen, weak care";
-    case PT_SP_ADULT_PERFECT: return "Perfectly raised adult";
-    case PT_SP_ADULT_GREAT:   return "A great-raised adult";
-    case PT_SP_ADULT_NORMAL:  return "An ordinary adult";
-    case PT_SP_ADULT_NEGLECT: return "An adult left neglected";
+    case PT_SP_TEEN_C:        return "Weak-care teen";
+    case PT_SP_ADULT_PERFECT: return "Perfect-care adult";
+    case PT_SP_ADULT_GREAT:   return "Great-care adult";
+    case PT_SP_ADULT_NORMAL:  return "Ordinary adult";
+    case PT_SP_ADULT_NEGLECT: return "Neglected adult";
     case PT_SP_ADULT_MOON:    return "???";
     default:                  return "";
     }
 }
 
-static void dex_mark_selected(void)
-{
-    if (s_dex_sel_box != NULL) {
-        border(s_dex_sel_box, COL_SEL, 3);
-    }
-}
-
-// 全局位索引 → 槽/槽内序号。
+// 全局位索引 -> 槽 / 槽内序号。
 static void dex_locate(int abs_idx, pt_gene_slot_t *slot, uint8_t *index)
 {
     for (uint8_t s = 0; s < PT_GENE_SLOT_COUNT; s += 1) {
@@ -2773,203 +2781,341 @@ static void dex_locate(int abs_idx, pt_gene_slot_t *slot, uint8_t *index)
     *index = 0;
 }
 
+// PARTS 当前游标所在页的格数 / 首件全局索引。
+static uint8_t dex_parts_shown(void)
+{
+    pt_gene_slot_t slot;
+    uint8_t idx;
+    dex_locate((uint8_t) s_dex_cursor, &slot, &idx);
+    uint8_t count = pt_slot_part_count(slot);
+    uint8_t sh = (uint8_t) (count - (idx / 8) * 8);
+    return sh > 8 ? 8 : sh;
+}
+
+static uint8_t dex_parts_base(void)
+{
+    pt_gene_slot_t slot;
+    uint8_t idx;
+    dex_locate((uint8_t) s_dex_cursor, &slot, &idx);
+    return (uint8_t) (pt_dex_slot_offset(slot) + (idx / 8) * 8);
+}
+
+// DEX 页脚 5 控件：‹ ALBUM PARTS BADGES ›。focus 为局部序号 0..4，-1=焦点在格内。
+static void dex_footer_refresh(int focus, bool prev_off, bool next_off)
+{
+    lv_obj_t *w[5] = {
+        s_df_prev, s_df_tab[0], s_df_tab[1], s_df_tab[2], s_df_next
+    };
+    bool dis[5] = { prev_off, false, false, false, next_off };
+    for (int i = 0; i < 5; i += 1) {
+        bool on = (i == focus);
+        bool is_tab = (i >= 1 && i <= 3);
+        bool active = is_tab && ((i - 1) == s_dex_tab);
+        uint32_t fill = is_tab ? (active ? COL_TAB_ON : COL_CARD_WHITE)
+                               : (dis[i] ? COL_DIS_BG : COL_DOCK_BG);
+        lv_obj_set_style_bg_color(w[i], lv_color_hex(fill), 0);
+        if (on) {
+            border(w[i], COL_SEL, 2);
+        } else if (active) {
+            border(w[i], COL_SEL, 1);
+        } else {
+            border(w[i], dis[i] ? COL_DIS_LINE : COL_INK, 1);
+        }
+        lv_obj_t *txt = (lv_obj_t *) lv_obj_get_child(w[i], 0);
+        lv_obj_set_style_text_color(
+            txt, lv_color_hex(dis[i] ? COL_DIS_TX : COL_INK), 0);
+    }
+}
+
+static void dex_frame(const char *title, const char *page)
+{
+    lv_obj_clean(s_modal_body);
+    memset(s_dex_cell, 0, sizeof(s_dex_cell));
+    frame_pv2(false);
+    show(s_dfooter);
+    lv_label_set_text(s_modal_title, title);
+    lv_label_set_text(s_mp_cur, page);
+    lv_obj_set_pos(s_mp_cur, 91, 15);
+    show(s_mp_cur);
+}
+
+// ---------------------------------------------------------------------------
+// ALBUM：物种卡 3 页 x3
+// ---------------------------------------------------------------------------
+
 static void dex_build_species(void)
 {
-    char title[24];
-    snprintf(title, sizeof(title), "ALBUM  %d/8",
-             (int) pt_dex_species_seen_count(&s_dex_snap));
-    lv_label_set_text(s_modal_title, title);
-
     const uint8_t pages = 3;
     if (s_dex_page < 0) { s_dex_page = 0; }
     if (s_dex_page >= pages) { s_dex_page = pages - 1; }
+
+    char pg[8];
+    snprintf(pg, sizeof(pg), "%u/3", (unsigned) (s_dex_page + 1));
+    dex_frame("ALBUM", pg);
+
     static const char *const CAREW[4] = {
         "Perfect", "Great", "Normal", "Neglect"
+    };
+    static const uint32_t CAREC[4] = {
+        COL_GREEN, COL_BLUE, COL_YELLOW, COL_RED
     };
     static const uint32_t PIPC[3] = { COL_BLUE, COL_GREEN, COL_YELLOW };
 
     for (uint8_t k = 0; k < 3; k += 1) {
         uint8_t ri = (uint8_t) (s_dex_page * 3 + k);
-        int y = 20 + k * 46;
         if (ri >= PT_DEX_SPECIES) {
             break;
         }
+        int y = (int) k * 46;
         pt_species_t sp = pt_dex_roster(ri);
         uint8_t lv = pt_dex_species_level(&s_dex_snap, sp);
-        lv_obj_t *box = rect(s_modal_body, 0, y, 192, 42, 8, COL_PANEL);
+        lv_obj_t *box = rect(s_modal_body, 0, y, 192, 42, 10, COL_CARD_WHITE);
+        border(box, COL_INK, 1);
 
-        // 物种色牌（未发现：灰底问号剪影）。
-        const profile_t *p = profile_for(ri < 3 ? PT_STAGE_TEEN
-                                                 : PT_STAGE_ADULT, sp);
-        lv_obj_t *tok = rect(box, 6, 8, 26, 26, 6,
-                             lv > 0 ? p->body : COL_PIP_OFF);
+        // 物种色牌（未发现：灰底问号）。
+        lv_obj_t *tok = rect(box, 8, 7, 28, 28, 8, COL_PIP_OFF);
         if (lv > 0) {
+            const profile_t *p = profile_for(ri < 3 ? PT_STAGE_TEEN
+                                                    : PT_STAGE_ADULT, sp);
+            lv_obj_set_style_bg_color(tok, lv_color_hex(p->body), 0);
             border(tok, p->edge, 2);
-        }
-        label(tok, 0, 4, 26, &lv_font_montserrat_14,
-              lv > 0 ? p->edge : COL_DIM, lv > 0 ? "" : "?");
-
-        char line[32];
-        snprintf(line, sizeof(line), "#%d %s", (int) ri + 1,
-                 lv > 0 ? species_name(sp) : "???");
-        label(box, 38, 2, 110, &lv_font_montserrat_14, COL_INK, line);
-        for (uint8_t pip = 0; pip < 3; pip += 1) {
-            rect(box, 150 + pip * 9, 6, 6, 6, 2,
-                 lv > pip ? PIPC[pip] : COL_PIP_OFF);
-        }
-        if (lv == 0) {
-            label(box, 38, 22, 150, &lv_font_montserrat_14, COL_DIM,
-                  dex_locked_hint(sp));
+            uint32_t ec = p->dark_eyes ? 0xFFFFFFu : COL_INK;
+            rect(tok, 9, 13, 3, 3, 1, ec);
+            rect(tok, 17, 13, 3, 3, 1, ec);
         } else {
+            label(tok, 0, 6, 28, &lv_font_montserrat_14, COL_DIS_TX, "?");
+        }
+
+        char line[24];
+        snprintf(line, sizeof(line), "#%u %s", (unsigned) ri + 1,
+                 lv > 0 ? species_name(sp) : "???");
+        llabel(box, 44, 4, 110, &lv_font_montserrat_14, COL_INK, line);
+
+        for (uint8_t pip = 0; pip < 3; pip += 1) {
+            bool lit = lv > pip;
+            lv_obj_t *p = rect(box, 158 + (int) pip * 9, 8, 7, 7, 2,
+                               lit ? PIPC[pip] : COL_PIP_OFF);
+            if (lit) {
+                border(p, COL_INK, 1);
+            }
+        }
+
+        if (lv == 0) {
+            llabel(box, 44, 23, 140, &lv_font_montserrat_12, COL_SUB,
+                   dex_locked_hint(sp));
+        } else {
+            char pre[24];
+            snprintf(pre, sizeof(pre), "x%u raised - ",
+                     (unsigned) pt_dex_species_raised_count(&s_dex_snap, sp));
+            llabel(box, 44, 23, 100, &lv_font_montserrat_12, COL_SUB, pre);
             uint8_t care = pt_dex_species_best_care(&s_dex_snap, sp);
-            snprintf(line, sizeof(line), "x%d raised  Best %s",
-                     (int) pt_dex_species_raised_count(&s_dex_snap, sp),
-                     care < 4 ? CAREW[care] : "-");
-            label(box, 38, 22, 150, &lv_font_montserrat_14, COL_BLUE, line);
+            if (care < 4) {
+                llabel(box, 44 + text_w12(pre), 23, 60,
+                       &lv_font_montserrat_12, CAREC[care], CAREW[care]);
+            } else {
+                llabel(box, 44 + text_w12(pre), 23, 20,
+                       &lv_font_montserrat_12, COL_SUB, "-");
+            }
         }
     }
-    lv_obj_t *b = rect(s_modal_body, 56, 160, 80, 24, 8, COL_DOCK_BG);
-    label(b, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Parts >");
-    s_dex_sel_box = b;
-    dex_mark_selected();
+
+    dex_footer_refresh(s_dex_sel, s_dex_page == 0, s_dex_page + 1 >= pages);
 }
+
+// ---------------------------------------------------------------------------
+// PARTS：4x2 部件格 + 详情卡，游标为 64 件全局索引
+// ---------------------------------------------------------------------------
 
 static void dex_build_parts(void)
 {
-    lv_obj_clean(s_modal_body);
-    s_dex_sel_box = NULL;
-
     uint8_t total = pt_dex_part_total();
     if (s_dex_cursor < 0) { s_dex_cursor = 0; }
     if (s_dex_cursor >= total) { s_dex_cursor = total - 1; }
+
     pt_gene_slot_t slot;
     uint8_t idx;
     dex_locate((uint8_t) s_dex_cursor, &slot, &idx);
     uint8_t count = pt_slot_part_count(slot);
     uint8_t page = (uint8_t) (idx / 8);
-    uint8_t pages = (uint8_t) ((count + 7) / 8);
+    uint8_t shown = (uint8_t) (count - page * 8);
+    if (shown > 8) { shown = 8; }
+
+    char pg[8];
+    snprintf(pg, sizeof(pg), "%u/%u", (unsigned) (s_dex_cursor + 1),
+             (unsigned) total);
+    dex_frame("PARTS", pg);
+
+    // 槽名 + 已见计数。
+    llabel(s_modal_body, 0, 0, 80, &lv_font_montserrat_14, COL_INK,
+           dex_slot_name(slot));
     uint8_t seen_n = 0;
     for (uint8_t i = 0; i < count; i += 1) {
         if (pt_dex_part_has(&s_dex_snap, PT_DEX_PART_SEEN, slot, i)) {
             seen_n += 1;
         }
     }
-    char title[32];
-    snprintf(title, sizeof(title), "%s %d/%d  %d/%d",
-             dex_slot_name(slot), (int) page + 1, (int) pages,
-             (int) seen_n, (int) count);
-    lv_label_set_text(s_modal_title, title);
+    char seen[16];
+    snprintf(seen, sizeof(seen), "seen %u/%u", (unsigned) seen_n,
+             (unsigned) count);
+    rlabel12(s_modal_body, 192, 1, COL_SUB, seen);
 
-    uint8_t shown = (uint8_t) (count - page * 8);
-    if (shown > 8) { shown = 8; }
+    // 4x2 格网。
     for (uint8_t k = 0; k < shown; k += 1) {
-        uint8_t pi = (uint8_t) (page * 8 + k);
-        bool seen = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_SEEN, slot, pi);
-        bool owned = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_OWNED, slot, pi);
-        bool bred = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_BRED, slot, pi);
-        pt_rarity_t rar = pt_catalog_rarity(slot, pi);
-        int col = k % 4;
-        int row = k / 4;
-        lv_obj_t *cell = rect(s_modal_body, 4 + col * 46, 24 + row * 38,
-                              44, 34, 6, seen ? COL_PANEL : COL_PIP_OFF);
-        border(cell, seen ? dex_rarity_color(rar) : COL_DOCK_BG, 2);
-        char num[6];
-        snprintf(num, sizeof(num), "%d", (int) pi + 1);
-        label(cell, 0, 3, 44, &lv_font_montserrat_14,
-              seen ? dex_rarity_color(rar) : COL_DIM, seen ? num : "?");
-        label(cell, 4, 18, 12, &lv_font_montserrat_14,
-              seen ? dex_rarity_color(rar) : COL_DIM,
-              seen ? dex_rarity_letter(rar) : "");
-        if (owned) {
-            rect(cell, 32, 3, 7, 7, 2, COL_GREEN);
+        uint8_t si = (uint8_t) (page * 8 + k);
+        bool seen = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_SEEN, slot, si);
+        bool owned = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_OWNED, slot, si);
+        bool bred = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_BRED, slot, si);
+        pt_rarity_t rar = pt_catalog_rarity(slot, si);
+        int x = (int) (k % 4) * 48;
+        int y = 20 + (int) (k / 4) * 40;
+
+        // 焦点粉环先画，格矩形盖住内缘，只露外 2px。
+        if (s_dex_sel == k) {
+            lv_obj_t *ring = rect(s_modal_body, x - 2, y - 2, 48, 40, 10,
+                                  COL_CARD_PINK);
+            lv_obj_set_style_bg_opa(ring, LV_OPA_TRANSP, 0);
+            border(ring, COL_SEL, 2);
         }
-        if (bred) {
-            rect(cell, 32, 14, 7, 7, 2, COL_SEL);
-        }
-        if (s_dex_focus == 0
-            && (int) (pt_dex_slot_offset(slot) + pi) == s_dex_cursor) {
-            s_dex_sel_box = cell;
+
+        lv_obj_t *cell = rect(s_modal_body, x, y, 44, 36, 8,
+                              seen ? COL_CARD_WHITE : COL_PIP_OFF);
+        border(cell, seen ? dex_rarity_color(rar) : COL_DOCK_BG, 1);
+        s_dex_cell[k] = cell;
+
+        char num[4];
+        snprintf(num, sizeof(num), "%u", (unsigned) (si + 1));
+        if (seen) {
+            uint32_t rc = dex_rarity_color(rar);
+            label(cell, 0, 8, 44, &lv_font_montserrat_14, rc, num);
+            llabel(cell, 5, 21, 12, &lv_font_montserrat_12, rc,
+                   dex_rarity_letter(rar));
+            if (owned) {
+                rect(cell, 33, 5, 7, 7, 2, COL_GREEN);
+            }
+            if (bred) {
+                rect(cell, 33, 15, 7, 7, 2, COL_SEL);
+            }
+        } else {
+            label(cell, 0, 9, 44, &lv_font_montserrat_14, COL_DIS_TX, "?");
         }
     }
 
-    // 选中部件说明。
-    bool seen = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_SEEN, slot, idx);
-    bool owned = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_OWNED, slot, idx);
-    bool bred = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_BRED, slot, idx);
-    static const char *const RN[4] = { "Common", "Unusual", "Rare", "Legend" };
-    char hint[40];
-    if (!seen) {
-        snprintf(hint, sizeof(hint), "#%d not seen yet", (int) idx + 1);
+    // 游标所在件详情卡。
+    bool cseen = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_SEEN, slot, idx);
+    bool cowned = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_OWNED, slot, idx);
+    bool cbred = pt_dex_part_has(&s_dex_snap, PT_DEX_PART_BRED, slot, idx);
+    lv_obj_t *dc = rect(s_modal_body, 0, 100, 192, 44, 10, COL_CARD_WHITE);
+    border(dc, COL_INK, 1);
+    if (!cseen) {
+        char h[24];
+        snprintf(h, sizeof(h), "#%u not seen yet", (unsigned) (idx + 1));
+        llabel(dc, 10, 25, 170, &lv_font_montserrat_12, COL_SUB, h);
     } else {
-        const char *mark = owned ? "your pet has it"
-                          : bred ? "bred into family" : "seen on a visitor";
-        snprintf(hint, sizeof(hint), "#%d %s - %s", (int) idx + 1,
-                 RN[pt_catalog_rarity(slot, idx)], mark);
+        static const char *const RN[4] = {
+            "Common", "Unusual", "Rare", "Legend"
+        };
+        pt_rarity_t rar = pt_catalog_rarity(slot, idx);
+        char head[8];
+        snprintf(head, sizeof(head), "#%u ", (unsigned) (idx + 1));
+        llabel(dc, 10, 4, 40, &lv_font_montserrat_14, COL_INK, head);
+        llabel(dc, 10 + text_wf(&lv_font_montserrat_14, head), 4, 80,
+               &lv_font_montserrat_14, dex_rarity_color(rar), RN[rar]);
+        uint32_t mc;
+        const char *mt;
+        if (cowned) {
+            mc = COL_GREEN;
+            mt = "Your pet has it";
+        } else if (cbred) {
+            mc = COL_SEL;
+            mt = "Bred into family";
+        } else {
+            mc = COL_SUB;
+            mt = "Seen on a visitor";
+        }
+        rect(dc, 10, 27, 8, 8, 2, mc);
+        llabel(dc, 23, 25, 160, &lv_font_montserrat_12, COL_INK, mt);
     }
-    label(s_modal_body, 2, 102, 188, &lv_font_montserrat_14, COL_INK, hint);
 
-    lv_obj_t *tab = rect(s_modal_body, 16, 124, 160, 24, 8, COL_DOCK_BG);
-    label(tab, 0, 3, 160, &lv_font_montserrat_14, COL_INK, "Badges >");
-    lv_obj_t *back = rect(s_modal_body, 56, 152, 80, 24, 8, COL_DOCK_BG);
-    label(back, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Back");
-    if (s_dex_focus == 1) { s_dex_sel_box = tab; }
-    if (s_dex_focus == 2) { s_dex_sel_box = back; }
-    dex_mark_selected();
+    int n = (int) shown + 5;
+    if (s_dex_sel < 0 || s_dex_sel >= n) {
+        s_dex_sel = (int) shown + 2;   // 默认落在当前档 PARTS
+    }
+    int ffocus = (s_dex_sel >= (int) shown) ? (s_dex_sel - (int) shown) : -1;
+    dex_footer_refresh(ffocus, s_dex_cursor < 8,
+                       s_dex_cursor + 8 >= (int) total);
 }
+
+// ---------------------------------------------------------------------------
+// BADGES：总览 + 寿龄 + 6 槽纯血，2 页（6 + 2）
+// ---------------------------------------------------------------------------
 
 static void dex_build_badges(void)
 {
-    lv_label_set_text(s_modal_title, "BADGES");
-    // 8 条内容：2 条总览 + 6 条纯血槽；每页 6 条，共 2 页。
     const uint8_t pages = 2;
     if (s_dex_page < 0) { s_dex_page = 0; }
     if (s_dex_page >= pages) { s_dex_page = pages - 1; }
 
-    uint8_t hc = pt_social_hall_count(&s_ssnap);
-    for (uint8_t k = 0; k < 6; k += 1) {
-        uint8_t item = (uint8_t) (s_dex_page * 6 + k);
-        int y = 20 + k * 23;
-        char line[40];
-        if (item == 0) {
-            snprintf(line, sizeof(line), "Species %d/8  Parts %d/%d",
+    char pg[8];
+    snprintf(pg, sizeof(pg), "%u/2", (unsigned) (s_dex_page + 1));
+    dex_frame("BADGES", pg);
+
+    uint8_t hc = s_have_ssnap ? pt_social_hall_count(&s_ssnap) : 0;
+    uint8_t items = (s_dex_page == 0) ? 6 : 2;
+    for (uint8_t k = 0; k < items; k += 1) {
+        int y = (int) k * 24;
+        lv_obj_t *r = rect(s_modal_body, 0, y, 192, 22, 8, COL_CARD_WHITE);
+        border(r, COL_INK, 1);
+
+        // 第 1 页：k0=Album、k1=Oldest、k2..k5 -> 槽 0..3；第 2 页：k0..k1 -> 槽 4..5。
+        if (s_dex_page == 0 && k == 0) {
+            char line[32];
+            snprintf(line, sizeof(line), "Album %u/8  Parts %u/%u",
                      (int) pt_dex_species_seen_count(&s_dex_snap),
                      (int) pt_dex_parts_count(&s_dex_snap, PT_DEX_PART_SEEN),
                      (int) pt_dex_part_total());
-            label(s_modal_body, 4, y, 184, &lv_font_montserrat_14,
-                  COL_INK, line);
+            rect(s_modal_body, 9, y + 5, 12, 12, 6, COL_BLUE);
+            llabel(s_modal_body, 28, y + 4, 156, &lv_font_montserrat_12,
+                   COL_INK, line);
             continue;
         }
-        if (item == 1) {
-            snprintf(line, sizeof(line), "Oldest: %d days",
-                     (int) s_dex_snap.oldest_days);
-            label(s_modal_body, 4, y, 184, &lv_font_montserrat_14,
-                  COL_BLUE, line);
+        if (s_dex_page == 0 && k == 1) {
+            char days[12];
+            snprintf(days, sizeof(days), "%u days",
+                     (unsigned) s_dex_snap.oldest_days);
+            rect(s_modal_body, 9, y + 5, 12, 12, 6, COL_YELLOW);
+            llabel(s_modal_body, 28, y + 4, 80, &lv_font_montserrat_12,
+                   COL_INK, "Oldest");
+            rlabel12(s_modal_body, 184, y + 4, COL_INK, days);
             continue;
         }
-        pt_gene_slot_t slot = (pt_gene_slot_t) (item - 2);
+
+        // 纯链条徽章：槽位映射见循环上方注释。
+        uint8_t slot_ix = (s_dex_page == 0)
+                          ? (uint8_t) (k - 2)
+                          : (uint8_t) (k + 4);
+        pt_gene_slot_t slot = (pt_gene_slot_t) slot_ix;
         uint8_t chain = pt_dex_pure_chain(hc > 0 ? s_ssnap.hall : NULL, hc,
                                           slot);
+        char nm[16];
+        snprintf(nm, sizeof(nm), "Pure %s", dex_slot_name(slot));
+        rect(s_modal_body, 9, y + 5, 12, 12, 6,
+             chain >= 2 ? COL_YELLOW : COL_PIP_OFF);
+        llabel(s_modal_body, 28, y + 4, 100, &lv_font_montserrat_12,
+               COL_INK, nm);
         if (chain >= 2) {
-            snprintf(line, sizeof(line), "Pure %s x%d",
-                     dex_slot_name(slot), (int) chain);
-            label(s_modal_body, 4, y, 184, &lv_font_montserrat_14,
-                  COL_YELLOW, line);
+            char xv[8];
+            snprintf(xv, sizeof(xv), "x%u", (unsigned) chain);
+            rlabel12(s_modal_body, 184, y + 4, COL_YELLOW, xv);
         } else {
-            snprintf(line, sizeof(line), "Pure %s --", dex_slot_name(slot));
-            label(s_modal_body, 4, y, 184, &lv_font_montserrat_14,
-                  COL_DIM, line);
+            rlabel12(s_modal_body, 184, y + 4, COL_DIS_TX, "--");
         }
     }
-    lv_obj_t *b = rect(s_modal_body, 56, 160, 80, 24, 8, COL_DOCK_BG);
-    label(b, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Album >");
-    s_dex_sel_box = b;
-    dex_mark_selected();
+
+    dex_footer_refresh(s_dex_sel, s_dex_page == 0, s_dex_page + 1 >= pages);
 }
 
 static void dex_build(void)
 {
-    lv_obj_clean(s_modal_body);
-    s_dex_sel_box = NULL;
     if (s_dex_tab == DEX_TAB_SPECIES) {
         dex_build_species();
     } else if (s_dex_tab == DEX_TAB_PARTS) {
@@ -2991,9 +3137,21 @@ static void dex_open(void)
     s_dex_tab = DEX_TAB_SPECIES;
     s_dex_page = 0;
     s_dex_cursor = 0;
-    s_dex_focus = 0;
+    s_dex_sel = 1;
     s_mode = MODE_DEX;
     modal_open();
+    dex_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
+static void dex_goto_tab(int t)
+{
+    s_dex_tab = t;
+    s_dex_page = 0;
+    s_dex_cursor = 0;
+    s_dex_sel = (t == DEX_TAB_SPECIES) ? 1
+              : (t == DEX_TAB_BADGES) ? 3
+              : -1;   // PARTS 由 builder 归位到当前档
     dex_build();
     pet_audio_play(SND_CONFIRM);
 }
@@ -3006,70 +3164,102 @@ static void handle_dex_key(pet_ui_action_t act)
         return;
     }
 
+    if (act == PET_UI_ACT_PREV || act == PET_UI_ACT_NEXT) {
+        int dir = (act == PET_UI_ACT_NEXT) ? 1 : -1;
+        int n = (s_dex_tab == DEX_TAB_PARTS) ? (int) dex_parts_shown() + 5 : 5;
+        s_dex_sel += dir;
+        if (s_dex_sel < 0) { s_dex_sel += n; }
+        if (s_dex_sel >= n) { s_dex_sel -= n; }
+        if (s_dex_tab == DEX_TAB_PARTS) {
+            uint8_t shown = dex_parts_shown();
+            if (s_dex_sel < (int) shown) {
+                s_dex_cursor = (int) dex_parts_base() + s_dex_sel;
+            }
+        }
+        dex_build();
+        pet_audio_play(SND_CONFIRM);
+        return;
+    }
+
+    if (act != PET_UI_ACT_CONFIRM) {
+        return;
+    }
+
     if (s_dex_tab == DEX_TAB_SPECIES) {
-        if (act == PET_UI_ACT_PREV) {
-            s_dex_page = (s_dex_page + 2) % 3;
-            dex_build();
-        } else if (act == PET_UI_ACT_NEXT) {
-            s_dex_page = (s_dex_page + 1) % 3;
-            dex_build();
-        } else if (act == PET_UI_ACT_CONFIRM) {
-            s_dex_tab = DEX_TAB_PARTS;
-            s_dex_focus = 0;
-            s_dex_cursor = 0;   // 每次进入部件浏览从首件开始
-            dex_build();
-            pet_audio_play(SND_CONFIRM);
+        if (s_dex_sel == 0) {
+            if (s_dex_page > 0) {
+                s_dex_page -= 1;
+                s_dex_sel = 1;
+                dex_build();
+                pet_audio_play(SND_CONFIRM);
+            }
+        } else if (s_dex_sel == 2) {
+            dex_goto_tab(DEX_TAB_PARTS);
+        } else if (s_dex_sel == 3) {
+            dex_goto_tab(DEX_TAB_BADGES);
+        } else if (s_dex_sel == 4) {
+            if (s_dex_page + 1 < 3) {
+                s_dex_page += 1;
+                s_dex_sel = 1;
+                dex_build();
+                pet_audio_play(SND_CONFIRM);
+            }
         }
         return;
     }
 
     if (s_dex_tab == DEX_TAB_BADGES) {
-        if (act == PET_UI_ACT_PREV) {
-            s_dex_page = (s_dex_page + 1) % 2;
-            dex_build();
-        } else if (act == PET_UI_ACT_NEXT) {
-            s_dex_page = (s_dex_page + 1) % 2;
-            dex_build();
-        } else if (act == PET_UI_ACT_CONFIRM) {
-            s_dex_tab = DEX_TAB_SPECIES;
-            s_dex_page = 0;
-            dex_build();
-            pet_audio_play(SND_CONFIRM);
+        if (s_dex_sel == 0) {
+            if (s_dex_page > 0) {
+                s_dex_page -= 1;
+                s_dex_sel = 3;
+                dex_build();
+                pet_audio_play(SND_CONFIRM);
+            }
+        } else if (s_dex_sel == 1) {
+            dex_goto_tab(DEX_TAB_SPECIES);
+        } else if (s_dex_sel == 2) {
+            dex_goto_tab(DEX_TAB_PARTS);
+        } else if (s_dex_sel == 4) {
+            if (s_dex_page + 1 < 2) {
+                s_dex_page += 1;
+                s_dex_sel = 3;
+                dex_build();
+                pet_audio_play(SND_CONFIRM);
+            }
         }
         return;
     }
 
-    // 部件页
-    uint8_t total = pt_dex_part_total();
-    if (act == PET_UI_ACT_PREV) {
-        if (s_dex_focus == 1) {
-            s_dex_focus = 0;
-        } else if (s_dex_focus == 2) {
-            s_dex_focus = 1;
-        } else if (s_dex_cursor > 0) {
-            s_dex_cursor -= 1;
-        }
-        dex_build();
-    } else if (act == PET_UI_ACT_NEXT) {
-        if (s_dex_focus == 0) {
-            if (s_dex_cursor + 1 >= total) {
-                s_dex_focus = 1;
-            } else {
-                s_dex_cursor += 1;
-            }
-        } else if (s_dex_focus == 1) {
-            s_dex_focus = 2;
-        }
-        dex_build();
-    } else if (act == PET_UI_ACT_CONFIRM) {
-        if (s_dex_focus == 1) {
-            s_dex_tab = DEX_TAB_BADGES;
-            s_dex_page = 0;
+    // PARTS：格本身无 OK 动作；页脚局部序号 0=‹ 1=ALBUM 2=PARTS 3=BADGES 4=›。
+    uint8_t shown = dex_parts_shown();
+    if (s_dex_sel < (int) shown) {
+        return;
+    }
+    int local = s_dex_sel - (int) shown;
+    if (local == 0) {
+        if (s_dex_cursor >= 8) {
+            s_dex_cursor -= 8;
+            pt_gene_slot_t slot;
+            uint8_t idx;
+            dex_locate((uint8_t) s_dex_cursor, &slot, &idx);
+            s_dex_sel = (int) (idx % 8);
             dex_build();
             pet_audio_play(SND_CONFIRM);
-        } else if (s_dex_focus == 2) {
-            modal_close();
-            pet_audio_play(SND_CANCEL);
+        }
+    } else if (local == 1) {
+        dex_goto_tab(DEX_TAB_SPECIES);
+    } else if (local == 3) {
+        dex_goto_tab(DEX_TAB_BADGES);
+    } else if (local == 4) {
+        if (s_dex_cursor + 8 < (int) pt_dex_part_total()) {
+            s_dex_cursor += 8;
+            pt_gene_slot_t slot;
+            uint8_t idx;
+            dex_locate((uint8_t) s_dex_cursor, &slot, &idx);
+            s_dex_sel = (int) (idx % 8);
+            dex_build();
+            pet_audio_play(SND_CONFIRM);
         }
     }
 }
@@ -5473,6 +5663,30 @@ void pet_ui_init(void)
     border(s_sf_next, COL_INK, 1);
     label(s_sf_next, 0, 3, 20, &lv_font_montserrat_12, COL_INK, ">");
     hide(s_sfooter);
+
+    // PV2 batch4 DEX 页脚：‹ ALBUM PARTS BADGES ›（几何同 STATUS 页脚）。
+    s_dfooter = lv_obj_create(panel);
+    lv_obj_remove_flag(s_dfooter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_dfooter, 0, 200);
+    lv_obj_set_size(s_dfooter, 208, 22);
+    lv_obj_set_style_bg_opa(s_dfooter, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_dfooter, 0, 0);
+    lv_obj_set_style_pad_all(s_dfooter, 0, 0);
+    s_df_prev = rect(s_dfooter, 10, 0, 20, 20, 8, COL_DOCK_BG);
+    border(s_df_prev, COL_INK, 1);
+    label(s_df_prev, 0, 3, 20, &lv_font_montserrat_12, COL_INK, "<");
+    static const char *const DF_TAB_NAME[3] = { "ALBUM", "PARTS", "BADGES" };
+    static const int32_t DF_TAB_X[3] = { 34, 81, 128 };
+    for (int i = 0; i < 3; i += 1) {
+        s_df_tab[i] = rect(s_dfooter, DF_TAB_X[i], 0, 46, 20, 9, COL_CARD_WHITE);
+        border(s_df_tab[i], COL_INK, 1);
+        label(s_df_tab[i], 0, 3, 46, &lv_font_montserrat_12, COL_INK,
+              DF_TAB_NAME[i]);
+    }
+    s_df_next = rect(s_dfooter, 178, 0, 20, 20, 8, COL_DOCK_BG);
+    border(s_df_next, COL_INK, 1);
+    label(s_df_next, 0, 3, 20, &lv_font_montserrat_12, COL_INK, ">");
+    hide(s_dfooter);
 
     s_mback = label(panel, 0, 223, 208, &lv_font_montserrat_12, COL_HINT,
                     "hold OK - back");
