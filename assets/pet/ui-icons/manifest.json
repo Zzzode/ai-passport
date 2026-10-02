@@ -40,5 +40,187 @@
       "w": 26,
       "h": 26
     }
+  ],
+  "card": [
+    {
+      "name": "bottle",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "meal",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "snack",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "riceball",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "biscuit",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "bento",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "pudding",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "cake",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "crepe",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "watermelon",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "ball",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "musicbox",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "bubbles",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "gift",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "emptybag",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "petface",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "scale",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "bond",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "wallet",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "foodbowl",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "funface",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "health",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "bolt",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "bandaid",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "medal",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "snub",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "star",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "speaker",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "speakeroff",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "crescent",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "hilo",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "rhythm",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "catch",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "memory",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "walk",
+      "w": 28,
+      "h": 28
+    },
+    {
+      "name": "prefer",
+      "w": 28,
+      "h": 28
+    }
   ]
 }

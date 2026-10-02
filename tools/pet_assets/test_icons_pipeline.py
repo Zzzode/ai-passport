@@ -67,9 +67,9 @@ class PngRgbaTests(unittest.TestCase):
 class BuildIconsTests(unittest.TestCase):
     def test_real_assets_build_and_swap_bgra(self) -> None:
         # The shipped manifest + PNGs must build cleanly.
-        images, total, dock, small, deco = build_icons.load_icons(ASSET_ROOT)
+        images, total, dock, small, deco, card = build_icons.load_icons(ASSET_ROOT)
         with tempfile.TemporaryDirectory() as td:
-            build_icons.emit(images, total, dock, small, deco, td)
+            build_icons.emit(images, total, dock, small, deco, card, td)
             header = open(os.path.join(td, "pet_ui_icons_data.h"),
                           encoding="utf-8").read()
             source = open(os.path.join(td, "pet_ui_icons_data.c"),
@@ -78,11 +78,16 @@ class BuildIconsTests(unittest.TestCase):
         self.assertIn("pet_ui_small_moon", header)
         self.assertIn("pet_ui_deco_sun30", header)
         self.assertIn("pet_ui_deco_moon26", header)
+        self.assertIn("pet_ui_card_ball", header)
+        self.assertIn("pet_ui_card_petface", header)
+        self.assertIn("pet_ui_card_hilo", header)
         self.assertIn("1600u", header)  # 20x20x4
         self.assertIn("3600u", header)  # 30x30x4 decal
         self.assertIn("2704u", header)  # 26x26x4 moon decal
-        # 12 dock icons x 2 sizes + 8 small + 3 deco = 35 bitmaps.
-        self.assertEqual(source.count("] = {"), 35)
+        self.assertIn("3136u", header)  # 28x28x4 card thumbnail
+        # 12 dock icons x 2 sizes + 8 small + 3 deco + 36 cards = 71 bitmaps.
+        self.assertEqual(source.count("] = {"), 71)
+        self.assertEqual(len(card), 36)
 
     def test_bgra_byte_order(self) -> None:
         # Synthetic 1x1 red opaque RGBA must land as B,G,R,A = 00,00,ff,ff.
@@ -99,7 +104,7 @@ class BuildIconsTests(unittest.TestCase):
                            20, 20, bytes([255, 0, 0, 255]) * 400)
             write_rgba_png(os.path.join(td, "ui-icons", "dock", "red-25.png"),
                            25, 25, bytes([0, 255, 0, 128]) * 625)
-            images, total, _, _, _ = build_icons.load_icons(td)
+            images, total, _, _, _, _ = build_icons.load_icons(td)
         feed20 = next(px for sym, _, _, px in images
                       if sym == "pet_ui_dock_red_20")
         feed25 = next(px for sym, _, _, px in images
