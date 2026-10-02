@@ -59,6 +59,23 @@
 #define COL_NIGHT_SHADOW 0x14152E
 #define COL_NIGHT_STAR   0xFFF6C8
 
+// PV2 统一卡片弹层色板（定稿 pv2-cards.html：奶白卡 + 暖墨描边 + 马卡龙）
+#define COL_CARD_WHITE   0xFFFFFF
+#define COL_CARD_PINK    0xFFF3F8   // 选中卡粉底
+#define COL_CARD_GIFT    0xFFE9A8   // 签到礼品卡黄底
+#define COL_CARD_GREENBG 0xE7F8E9   // Style / OWNED 浅绿底
+#define COL_HAIR         0xE5E0DA   // 页眉发丝线（墨色 14% 落奶白）
+#define COL_SUB          0x9A908A   // 卡片副标签灰
+#define COL_HINT         0xB4A99E   // hold OK 提示灰
+#define COL_COIN_BG      0xFFE9A8
+#define COL_BADGE_BLUE   0xE7F0FF   // 背包数量徽章
+#define COL_GREEN_DEEP   0x3E9B52
+#define COL_DIS_BG       0xEFE9DC   // 失效翻页键
+#define COL_DIS_LINE     0xD1C7B8
+#define COL_DIS_TX       0xC3B8AA
+#define COL_TAB_ON       0xF3A0BC   // 页脚激活段粉底
+#define COL_PLAY_SWEET   0xDFF5E2   // G2 判定条中心甜区
+
 #define LCD_W BSP_LCD_W
 #define LCD_H BSP_LCD_H
 
@@ -156,11 +173,13 @@ static lv_obj_t *s_modal;
 static lv_obj_t *s_modal_title;
 static lv_obj_t *s_modal_body;
 static lv_obj_t *s_list_row[6];
+static lv_obj_t *s_game_box;      // G1 中央卡（赢时变绿）
 static lv_obj_t *s_game_card;
+static lv_obj_t *s_game_sub;      // 结果副行 "7 -> 9"
 static lv_obj_t *s_game_hi;
 static lv_obj_t *s_game_lo;
 static lv_obj_t *s_game_result;
-static lv_obj_t *s_game_wins;
+static lv_obj_t *s_game_pip[5];   // 5 档胜场灯
 static lv_obj_t *s_game_hint;
 
 // 全屏演出与纪念
@@ -174,17 +193,17 @@ static lv_obj_t *s_memorial_tier;
 static ui_mode_t s_mode = MODE_ROOM;
 static int s_list_kind;
 static int s_list_sel;
-static int s_list_count;
 static int s_status_page;
+static int s_status_focus;   // PV2 STATUS 页脚焦点：0=‹ 1=INFO 2=VITALS 3=CARE 4=›
+static uint8_t s_sound_page; // PV2 SOUND 卡片页：0=音量四档 1=免打扰两档
 
 static pet_game_t s_game;
 static int s_g_phase;
 static int s_g_choice;
 static int64_t s_g_exit_armed_until;
 
-// 游戏选择器
-static int8_t s_games_sel;
-static lv_obj_t *s_games_row[PT_GAME_COUNT];
+// 游戏选择器（PV2 两页卡：页 0 = G1–G4，页 1 = G5–G6；焦点复用 s_list_sel）
+static uint8_t s_games_page;
 
 // G2–G6 统一运行时
 static uint8_t s_gx_id;
@@ -201,10 +220,20 @@ static pet_g4_t s_g4;
 static pet_g5_t s_g5;
 static pet_g6_t s_g6;
 static bool s_gx_job;         // true=打工短关（结算走工资，非游戏奖金）
+static lv_obj_t *s_gx_pill;       // 顶部信息胶囊底
 static lv_obj_t *s_gx_info;
 static lv_obj_t *s_gx_hint;
-static lv_obj_t *s_gx_mk[8];
+#define GX_MK_N 12
+static lv_obj_t *s_gx_mk[GX_MK_N];
 static lv_obj_t *s_gx_ml[4];
+#define GX_IMG_N 3
+static lv_obj_t *s_gx_img[GX_IMG_N];
+// READY / RESULT 中央卡
+static lv_obj_t *s_gx_card;
+static lv_obj_t *s_gx_card_icon;
+static lv_obj_t *s_gx_card_l1;
+static lv_obj_t *s_gx_card_l2;
+static lv_obj_t *s_gx_card_l3;
 
 // 成年职业（S3）
 static pt_jobs_t s_jobs;
@@ -237,11 +266,56 @@ static bool s_checkin_prompted;   // 本次开机是否已弹过签到
 // 商店/背包视图
 static bool s_shop_bag;           // false=货架, true=背包
 static uint8_t s_shop_page;
-static uint8_t s_shop_sel;
-static uint8_t s_shop_rows;       // 当前页渲染的行数
-static uint16_t s_shop_row_item[6];
-static uint8_t s_shop_row_kind[6];   // 0=物品 1=More 2=Shop/Bag 切换 3=签到 4=Style
+static uint8_t s_shop_sel;        // PV2：跨卡片+页脚的扁平焦点序号
 static bool s_shop_dirty;
+
+// PV2 卡片弹层：当前页卡片根矩形（最多 4 张）与常态底色（选中态切粉底后复原）。
+static lv_obj_t *s_pv2_card[4];
+static uint32_t s_pv2_card_bg[4];
+
+// PV2 扁平焦点槽：卡片在前，末尾按  ‹ / SHOP / BAG / › 顺序挂页脚控件。
+enum {
+    PV2_F_CARD = 0,
+    PV2_F_PREV,
+    PV2_F_SHOP,
+    PV2_F_BAG,
+    PV2_F_NEXT,
+};
+#define PV2_F_MAX 9
+static uint8_t s_focus_n;
+static uint8_t s_focus_kind[PV2_F_MAX];
+static uint8_t s_focus_param[PV2_F_MAX];   // CARD 时为当前页内卡序号
+
+// SHOP/BAG 标签页下的完整条目序列（签到/Style 作为虚拟行），每页切 4 张。
+enum {
+    SEQ_ITEM = 0,
+    SEQ_BONUS,
+    SEQ_STYLE,
+};
+#define SEQ_MAX (PT_ECON_INV_SLOTS + 2)
+static uint8_t s_seq_n;
+static uint8_t s_seq_kind[SEQ_MAX];
+static uint16_t s_seq_id[SEQ_MAX];
+static uint8_t s_shop_pages;
+
+// PV2 弹层框架 chrome：发丝线 / 金币胶囊 / 页码 / 页脚 / 返回提示 / toast。
+static lv_obj_t *s_mhair;
+static lv_obj_t *s_mcoin;
+static lv_obj_t *s_mcoin_lbl;
+static lv_obj_t *s_mp_prev;
+static lv_obj_t *s_mp_cur;
+static lv_obj_t *s_mp_next;
+static lv_obj_t *s_mfooter;
+static lv_obj_t *s_ft_prev, *s_ft_shop, *s_ft_bag, *s_ft_next;
+// PV2 batch2 STATUS 专用页脚：‹ INFO VITALS CARE ›（与 SHOP 页脚互斥）。
+static lv_obj_t *s_sfooter;
+static lv_obj_t *s_sf_prev;
+static lv_obj_t *s_sf_tab[3];
+static lv_obj_t *s_sf_next;
+static lv_obj_t *s_mback;
+static lv_obj_t *s_toast_box;
+static lv_obj_t *s_toast_msg;
+static lv_timer_t *s_toast_timer;
 
 // 换装/家具/主题（S4）
 static pt_decor_t s_dsnap;
@@ -752,10 +826,380 @@ static void dock_refresh_selected(void)
 // 弹层：通用列表（喂食 / 设置）、状态分页、G1 游戏
 // ---------------------------------------------------------------------------
 
+// ===========================================================================
+// PV2 统一卡片弹层（定稿 pet-redesign/pv2-cards.html）
+// 面板局部坐标：页眉 0..36，卡片区 42..198（4 张 192x36），页脚 200..220，
+// 返回提示基线约 234。frame_legacy 供 PV2 尚未覆盖的旧弹层使用原几何。
+// ===========================================================================
+
+static void toast_hide_cb(lv_timer_t *t)
+{
+    hide(s_toast_box);
+    s_toast_timer = NULL;
+    lv_timer_delete(t);
+}
+
+// 面板内顶部下滑的拒绝/反馈胶囊；1.2s 自动消失，不打断焦点。
+static void toast_show(const char *msg)
+{
+    lv_label_set_text(s_toast_msg, msg);
+    show(s_toast_box);
+    lv_obj_move_foreground(s_toast_box);
+    if (s_toast_timer != NULL) {
+        lv_timer_delete(s_toast_timer);
+    }
+    s_toast_timer = lv_timer_create(toast_hide_cb, 1200, NULL);
+}
+
+static void frame_legacy(void)
+{
+    lv_obj_set_pos(s_modal_body, 8, 44);
+    lv_obj_set_size(s_modal_body, 192, 188);
+    hide(s_mhair);
+    hide(s_mcoin);
+    hide(s_mp_prev);
+    hide(s_mp_cur);
+    hide(s_mp_next);
+    hide(s_mfooter);
+    hide(s_sfooter);
+    hide(s_mback);
+    hide(s_toast_box);
+    if (s_toast_timer != NULL) {
+        lv_timer_delete(s_toast_timer);
+        s_toast_timer = NULL;
+    }
+}
+
+static void frame_pv2(bool with_footer)
+{
+    lv_obj_set_pos(s_modal_body, 8, 42);
+    lv_obj_set_size(s_modal_body, 192, 156);
+    show(s_mhair);
+    show(s_mback);
+    if (with_footer) {
+        show(s_mfooter);
+    } else {
+        hide(s_mfooter);
+    }
+    hide(s_sfooter);
+    hide(s_mcoin);
+    // SOUND 会把页码挪到页眉居中；回到其它弹层时复位。
+    lv_obj_set_pos(s_mp_cur, 66, 15);
+    hide(s_mp_prev);
+    hide(s_mp_cur);
+    hide(s_mp_next);
+    hide(s_toast_box);
+}
+
+// Montserrat 12 ASCII 文本像素宽（不走 lv_text 可变参数 API）。
+static int32_t text_w12(const char *s)
+{
+    int32_t w = 0;
+    for (size_t i = 0; s[i] != '\0'; i += 1) {
+        w += lv_font_get_glyph_width(&lv_font_montserrat_12,
+                                     (uint32_t) s[i], (uint32_t) s[i + 1]);
+    }
+    return w;
+}
+
+static lv_obj_t *llabel(lv_obj_t *parent, int32_t x, int32_t y, int32_t w,
+                        const lv_font_t *font, uint32_t color, const char *text)
+{
+    lv_obj_t *l = label(parent, x, y, w, font, color, text);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_LEFT, 0);
+    return l;
+}
+
+// 右缘对齐 x_end 的 12px 文本（PV2 卡片右侧数值）。
+static lv_obj_t *rlabel12(lv_obj_t *parent, int32_t x_end, int32_t y,
+                          uint32_t color, const char *text)
+{
+    int32_t w = text_w12(text);
+    return llabel(parent, x_end - w, y, w + 1, &lv_font_montserrat_12,
+                  color, text);
+}
+
+// 仪表卡细槽条：轨道 100x7，填充 0..100（最小值 3px 圆点，同定稿稿）。
+static void meter100(lv_obj_t *parent, int32_t x, int32_t y, uint8_t v,
+                     uint32_t color)
+{
+    rect(parent, x, y, 100, 7, 3, COL_PIP_OFF);
+    int32_t fw = (int32_t) v;
+    if (fw < 3) {
+        fw = 3;
+    }
+    rect(parent, x, y, fw, 7, 3, color);
+}
+
+// 7px 效果心：绿=饱腹，黄=开心；空槽不画（稿面只亮实际强度）。
+static void card_hearts(lv_obj_t *p, int32_t x, int32_t y, uint8_t g,
+                        uint8_t yh)
+{
+    for (uint8_t i = 0; i < g; i += 1) {
+        icon_img(p, x + (int32_t) i * 12, y,
+                 pet_ui_small_dsc(PET_UI_SMALL_HEART_GREEN));
+    }
+    for (uint8_t i = 0; i < yh; i += 1) {
+        icon_img(p, x + (int32_t) (g + i) * 12, y,
+                 pet_ui_small_dsc(PET_UI_SMALL_HEART_YELLOW));
+    }
+}
+
+enum {
+    RIGHT_NONE = 0,
+    RIGHT_PRICE,    // 金币胶囊（price）
+    RIGHT_SALE,     // 红 -20% 标签 + 现价 / 删除线原价
+    RIGHT_OWNED,    // 绿对勾圆
+    RIGHT_QTY,      // 背包食物数量
+    RIGHT_PLAY,     // 玩具剩余次数（qty=剩余 0..3）
+    RIGHT_GET,      // 签到 GET
+    RIGHT_GO,       // Style GO
+};
+
+static void card_right(lv_obj_t *root, uint8_t mode, uint32_t price,
+                       uint32_t old_price, uint8_t qty)
+{
+    char buf[16];
+    switch (mode) {
+    case RIGHT_PRICE: {
+        snprintf(buf, sizeof(buf), "%luG", (unsigned long) price);
+        int32_t tw = text_w12(buf);
+        int32_t pw = tw + 18;
+        if (pw < 40) {
+            pw = 40;
+        }
+        int32_t px = 188 - pw;
+        lv_obj_t *pill = rect(root, px, 9, pw, 18, 9, COL_COIN_BG);
+        border(pill, COL_INK, 1);
+        rect(pill, 5, 6, 6, 6, 3, COL_YELLOW);   // 小金币点（盒内描边简化）
+        label(pill, 11, 2, pw - 13, &lv_font_montserrat_12, COL_INK, buf);
+        break;
+    }
+    case RIGHT_SALE: {
+        lv_obj_t *tag = rect(root, 140, 4, 32, 13, 4, COL_RED);
+        label(tag, 0, 0, 32, &lv_font_montserrat_12, COL_CARD_WHITE, "-20%");
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long) price);
+        int32_t wn = text_w12(buf);
+        char old[12];
+        snprintf(old, sizeof(old), "%lu", (unsigned long) old_price);
+        int32_t wo = text_w12(old);
+        int32_t gx = 188 - (8 + 2 + wn + 5 + wo);
+        rect(root, gx, 23, 6, 6, 3, COL_YELLOW);
+        llabel(root, gx + 9, 19, wn + 2, &lv_font_montserrat_12, COL_INK, buf);
+        int32_t ox = gx + 9 + wn + 5;
+        llabel(root, ox, 19, wo + 2, &lv_font_montserrat_12, COL_HINT, old);
+        // 1px 删除线（不用 text_decor，跨 LVGL 小版本最稳）。
+        rect(root, ox, 26, wo, 1, 0, COL_HINT);
+        break;
+    }
+    case RIGHT_OWNED: {
+        lv_obj_t *c = rect(root, 168, 8, 20, 20, 10, COL_CARD_GREENBG);
+        border(c, COL_GREEN, 1);
+        label(c, 0, 3, 20, &lv_font_montserrat_12, COL_GREEN_DEEP,
+              LV_SYMBOL_OK);
+        break;
+    }
+    case RIGHT_QTY: {
+        lv_obj_t *c = rect(root, 167, 7, 22, 22, 11, COL_BADGE_BLUE);
+        border(c, COL_INK, 1);
+        snprintf(buf, sizeof(buf), "x%u", (unsigned) qty);
+        label(c, 0, 4, 22, &lv_font_montserrat_12, COL_INK, buf);
+        break;
+    }
+    case RIGHT_PLAY: {
+        int32_t tw = text_w12("play");
+        llabel(root, 159 - tw, 19, tw + 1, &lv_font_montserrat_12, COL_INK,
+               "play");
+        for (uint8_t i = 0; i < 3; i += 1) {
+            rect(root, 163 + (int32_t) i * 9, 20, 7, 9, 2,
+                 i < qty ? COL_BLUE : COL_PIP_OFF);
+        }
+        break;
+    }
+    case RIGHT_GET:
+    case RIGHT_GO: {
+        lv_obj_t *g = rect(root, 148, 9, 36, 17, 9,
+                           mode == RIGHT_GET ? COL_YELLOW : COL_GREEN);
+        border(g, COL_INK, 1);
+        label(g, 0, 2, 36, &lv_font_montserrat_12,
+              mode == RIGHT_GET ? COL_INK : COL_PANEL,
+              mode == RIGHT_GET ? "GET" : "GO");
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+// 建一张 192x36 卡片（父级 s_modal_body，y 为 body 局部坐标）。
+static lv_obj_t *pv2_card(uint8_t idx, int32_t y,
+                          const lv_image_dsc_t *art, const char *name,
+                          uint8_t gh, uint8_t yh, const char *sub,
+                          uint32_t bg, uint8_t right, uint32_t price,
+                          uint32_t old_price, uint8_t qty)
+{
+    lv_obj_t *r = rect(s_modal_body, 0, y, 192, 36, 10, bg);
+    border(r, COL_INK, 1);
+    if (art != NULL) {
+        icon_img(r, 4, 4, art);
+    }
+    llabel(r, 40, 3, 104, &lv_font_montserrat_14, COL_INK, name);
+    card_hearts(r, 40, 19, gh, yh);
+    if (sub != NULL && sub[0] != '\0') {
+        int32_t sx = 40 + (int32_t) (gh + yh) * 12 + 3;
+        llabel(r, sx, 19, 188 - sx, &lv_font_montserrat_12, COL_SUB, sub);
+    }
+    card_right(r, right, price, old_price, qty);
+    s_pv2_card[idx] = r;
+    s_pv2_card_bg[idx] = bg;
+    return r;
+}
+
+static void box_focus_style(lv_obj_t *o, bool on, bool disabled)
+{
+    if (on) {
+        border(o, COL_SEL, 2);
+    } else {
+        border(o, disabled ? COL_DIS_LINE : COL_INK, 1);
+    }
+}
+
+// 重画全部焦点态：卡片选中粉底粉框；页脚控件选中粉框。
+static void pv2_mark(uint8_t sel, bool footer)
+{
+    for (uint8_t i = 0; i < s_focus_n; i += 1) {
+        if (s_focus_kind[i] != PV2_F_CARD) {
+            continue;
+        }
+        uint8_t p = s_focus_param[i];
+        bool on = (i == sel);
+        lv_obj_set_style_bg_color(s_pv2_card[p],
+                                  lv_color_hex(on ? COL_CARD_PINK
+                                                  : s_pv2_card_bg[p]), 0);
+        box_focus_style(s_pv2_card[p], on, false);
+    }
+    if (!footer) {
+        return;
+    }
+    for (uint8_t i = 0; i < s_focus_n; i += 1) {
+        uint8_t k = s_focus_kind[i];
+        bool on = (i == sel);
+        if (k == PV2_F_PREV) {
+            box_focus_style(s_ft_prev, on, s_shop_page == 0);
+        } else if (k == PV2_F_NEXT) {
+            box_focus_style(s_ft_next, on, s_shop_page + 1 >= s_shop_pages);
+        } else if (k == PV2_F_SHOP) {
+            box_focus_style(s_ft_shop, on, false);
+        } else if (k == PV2_F_BAG) {
+            box_focus_style(s_ft_bag, on, false);
+        }
+    }
+}
+
+static void focus_add(uint8_t kind, uint8_t param)
+{
+    if (s_focus_n >= PV2_F_MAX) {
+        return;
+    }
+    s_focus_kind[s_focus_n] = kind;
+    s_focus_param[s_focus_n] = param;
+    s_focus_n += 1;
+}
+
+// 页脚布局：多页时 ‹ / SHOP / BAG / ›；单页只留居中双段。
+static void footer_layout(bool pager)
+{
+    show(s_mfooter);
+    lv_obj_t *sl = (lv_obj_t *) lv_obj_get_child(s_ft_shop, 0);
+    lv_obj_t *bl = (lv_obj_t *) lv_obj_get_child(s_ft_bag, 0);
+    if (pager) {
+        show(s_ft_prev);
+        show(s_ft_next);
+        lv_obj_set_pos(s_ft_prev, 14, 0);
+        lv_obj_set_pos(s_ft_next, 174, 0);
+        lv_obj_set_pos(s_ft_shop, 38, 0);
+        lv_obj_set_pos(s_ft_bag, 104, 0);
+        lv_obj_set_size(s_ft_shop, 66, 20);
+        lv_obj_set_size(s_ft_bag, 66, 20);
+        lv_obj_set_width(sl, 66);
+        lv_obj_set_width(bl, 66);
+    } else {
+        hide(s_ft_prev);
+        hide(s_ft_next);
+        lv_obj_set_pos(s_ft_shop, 28, 0);
+        lv_obj_set_pos(s_ft_bag, 104, 0);
+        lv_obj_set_size(s_ft_shop, 76, 20);
+        lv_obj_set_size(s_ft_bag, 76, 20);
+        lv_obj_set_width(sl, 76);
+        lv_obj_set_width(bl, 76);
+    }
+}
+
+static void chrome_coins(uint32_t coins)
+{
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%luG", (unsigned long) coins);
+    int32_t pw = text_w12(buf) + 18;
+    if (pw < 40) {
+        pw = 40;
+    }
+    lv_obj_set_pos(s_mcoin, 196 - pw, 12);
+    lv_obj_set_size(s_mcoin, pw, 17);
+    lv_obj_set_width(s_mcoin_lbl, pw - 13);
+    lv_obj_set_pos(s_mcoin_lbl, 11, 2);
+    lv_label_set_text(s_mcoin_lbl, buf);
+    show(s_mcoin);
+}
+
+static void chrome_pager(uint8_t page, uint8_t pages)
+{
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%u/%u", (unsigned) (page + 1),
+             (unsigned) pages);
+    lv_label_set_text(s_mp_cur, buf);
+    lv_obj_set_style_text_color(s_mp_prev,
+                                lv_color_hex(page == 0 ? COL_DIS_TX : COL_INK),
+                                0);
+    lv_obj_set_style_text_color(s_mp_next,
+                                lv_color_hex(page + 1 >= pages ? COL_DIS_TX
+                                                               : COL_INK), 0);
+    show(s_mp_prev);
+    show(s_mp_cur);
+    show(s_mp_next);
+}
+
+// FOOD 卡片弹层：婴儿仅 Bottle；幼儿+ 为 Meal / Snack，免费直喂。
+static void food_build(void)
+{
+    lv_obj_clean(s_modal_body);
+    memset(s_pv2_card, 0, sizeof(s_pv2_card));
+    frame_pv2(false);
+    lv_label_set_text(s_modal_title, "FOOD");
+    s_focus_n = 0;
+
+    if (s_snap.stage == PT_STAGE_BABY) {
+        pv2_card(0, 0, pet_ui_card_dsc(PET_UI_CARD_BOTTLE), "Bottle",
+                 4, 1, "baby", COL_CARD_WHITE, RIGHT_NONE, 0, 0, 0);
+        focus_add(PV2_F_CARD, 0);
+    } else {
+        pv2_card(0, 0, pet_ui_card_dsc(PET_UI_CARD_MEAL), "Meal",
+                 3, 0, "meal", COL_CARD_WHITE, RIGHT_NONE, 0, 0, 0);
+        pv2_card(1, 40, pet_ui_card_dsc(PET_UI_CARD_SNACK), "Snack",
+                 1, 3, "snack", COL_CARD_WHITE, RIGHT_NONE, 0, 0, 0);
+        focus_add(PV2_F_CARD, 0);
+        focus_add(PV2_F_CARD, 1);
+    }
+    if ((uint8_t) s_list_sel >= s_focus_n) {
+        s_list_sel = 0;
+    }
+    pv2_mark((uint8_t) s_list_sel, false);
+}
+
 static void modal_open(void)
 {
     // 全屏弹层盖住房间：停掉宠物身上的持续动画，弹层期间不产生无谓失效。
     lv_anim_delete(s_creature, NULL);
+    frame_legacy();
     show(s_modal);
     lv_obj_move_foreground(s_modal);
 }
@@ -770,200 +1214,429 @@ static void modal_close(void)
     }
 }
 
-static void list_build(void)
+// SOUND 页脚：只留居中 ‹ ›（复用 SHOP 页脚容器，隐藏 SHOP/BAG 段）。
+static void footer_pager_only(void)
+{
+    show(s_mfooter);
+    hide(s_ft_shop);
+    hide(s_ft_bag);
+    show(s_ft_prev);
+    show(s_ft_next);
+    lv_obj_set_pos(s_ft_prev, 88, 0);
+    lv_obj_set_pos(s_ft_next, 132, 0);
+}
+
+// PV2 batch2：SOUND 卡片弹层。页 0 = Mute/Low/Mid/High 四档音量；
+// 页 1 = Quiet ON/OFF 免打扰。当前值挂 OWNED 绿勾，选中卡粉框。
+static void sound_build(void)
 {
     lv_obj_clean(s_modal_body);
-    memset(s_list_row, 0, sizeof(s_list_row));
+    memset(s_pv2_card, 0, sizeof(s_pv2_card));
+    frame_pv2(true);
+    footer_pager_only();
+    lv_label_set_text(s_modal_title, "SOUND");
 
-    const char *title;
-    uint8_t count = 0;
-    const char *rows[6] = { 0 };
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%u/2", (unsigned) (s_sound_page + 1));
+    lv_label_set_text(s_mp_cur, buf);
+    lv_obj_set_pos(s_mp_cur, 91, 15);
+    show(s_mp_cur);
 
-    if (s_list_kind == LIST_FOOD) {
-        title = "FOOD";
-        if (s_snap.stage == PT_STAGE_BABY) {
-            rows[count++] = "Bottle";
-        } else {
-            rows[count++] = "Meal";
-            rows[count++] = "Snack";
+    s_focus_n = 0;
+    if (s_sound_page == 0) {
+        static const char *const NAME[4] = { "Mute", "Low", "Mid", "High" };
+        static const char *const SUB[4] = {
+            "off", "soft", "normal", "loud",
+        };
+        static const pet_ui_card_t ART[4] = {
+            PET_UI_CARD_SPEAKER_OFF, PET_UI_CARD_SPEAKER,
+            PET_UI_CARD_SPEAKER, PET_UI_CARD_SPEAKER,
+        };
+        uint8_t cur = pet_app_volume();
+        for (uint8_t i = 0; i < 4; i += 1) {
+            pv2_card(i, (int32_t) i * 40, pet_ui_card_dsc(ART[i]), NAME[i],
+                     0, 0, SUB[i], COL_CARD_WHITE,
+                     i == cur ? RIGHT_OWNED : RIGHT_NONE, 0, 0, 0);
+            focus_add(PV2_F_CARD, i);
         }
     } else {
-        title = "SOUND";
-        rows[0] = "Mute";
-        rows[1] = "Low";
-        rows[2] = "Mid";
-        rows[3] = "High";
-        rows[4] = "Quiet: ON";
-        rows[5] = "Quiet: OFF";
-        count = 6;
-        s_list_sel = pet_app_volume();
+        bool quiet = pet_app_quiet();
+        pv2_card(0, 0, pet_ui_card_dsc(PET_UI_CARD_CRESCENT), "Quiet ON",
+                 0, 0, "quiet hrs", COL_CARD_WHITE,
+                 quiet ? RIGHT_OWNED : RIGHT_NONE, 0, 0, 0);
+        pv2_card(1, 40, pet_ui_card_dsc(PET_UI_CARD_SNUB), "Quiet OFF",
+                 0, 0, "all alerts", COL_CARD_WHITE,
+                 !quiet ? RIGHT_OWNED : RIGHT_NONE, 0, 0, 0);
+        focus_add(PV2_F_CARD, 0);
+        focus_add(PV2_F_CARD, 1);
     }
-    s_list_count = count;
+    focus_add(PV2_F_PREV, 0);
+    focus_add(PV2_F_NEXT, 0);
 
-    lv_label_set_text(s_modal_title, title);
-    for (uint8_t i = 0; i < count; i += 1) {
-        // 紧凑行：6 行（设置页）也要落进 188px 弹层主体。
-        lv_obj_t *row = rect(s_modal_body, 4, 4 + (int32_t) i * 28, 184, 25, 8,
-                             COL_PANEL);
-        label(row, 0, 3, 184, &lv_font_montserrat_14, COL_INK, rows[i]);
-        s_list_row[i] = row;
-    }
-    if (s_list_sel >= s_list_count) {
+    if ((uint8_t) s_list_sel >= s_focus_n) {
         s_list_sel = 0;
     }
-    for (int i = 0; i < s_list_count; i += 1) {
-        bool marked = (i == s_list_sel);
-        // 设置页同时标出当前免打扰档（音量选中框之外的第二处当前值）。
-        if (s_list_kind == LIST_SETTINGS
-            && ((pet_app_quiet() && i == 4) || (!pet_app_quiet() && i == 5))) {
-            marked = true;
+    // pv2_mark() 的端点失效判断读商店页码；SOUND 复用同一套样式逻辑。
+    s_shop_page = s_sound_page;
+    s_shop_pages = 2;
+    pv2_mark((uint8_t) s_list_sel, true);
+}
+
+// ---------------------------------------------------------------------------
+// PV2 batch2：STATUS 卡片弹层（INFO / VITALS / CARE，卡片全部只读）
+// ---------------------------------------------------------------------------
+
+static const char *stage_lower(pt_stage_t st)
+{
+    switch (st) {
+    case PT_STAGE_EGG: return "egg";
+    case PT_STAGE_BABY: return "baby";
+    case PT_STAGE_CHILD: return "child";
+    case PT_STAGE_TEEN: return "teen";
+    case PT_STAGE_ADULT: return "adult";
+    case PT_STAGE_SENIOR: return "senior";
+    default: return "--";
+    }
+}
+
+static lv_obj_t *status_card(int32_t y, pet_ui_card_t art)
+{
+    lv_obj_t *r = rect(s_modal_body, 0, y, 192, 36, 10, COL_CARD_WHITE);
+    border(r, COL_INK, 1);
+    icon_img(r, 4, 4, pet_ui_card_dsc(art));
+    return r;
+}
+
+static void status_page_info(void)
+{
+    char buf[48];
+
+    // 身份卡：物种名 + 阶段/年龄副行；成年右置性格，生病时副行让位给红字。
+    lv_obj_t *c = status_card(0, PET_UI_CARD_PETFACE);
+    llabel(c, 40, 3, 110, &lv_font_montserrat_14, COL_INK,
+           species_name(s_snap.species));
+    if (s_snap.sick) {
+        llabel(c, 40, 19, 110, &lv_font_montserrat_12, COL_RED, "sick now");
+    } else {
+        snprintf(buf, sizeof(buf), "%s - age %ud",
+                 stage_lower(s_snap.stage), (unsigned) s_snap.age_days);
+        llabel(c, 40, 19, 110, &lv_font_montserrat_12, COL_SUB, buf);
+        if (s_snap.stage >= PT_STAGE_ADULT) {
+            rlabel12(c, 188, 4, COL_SUB,
+                     pt_personality_name(
+                         (pt_personality_t) s_snap.genome.personality));
         }
-        if (marked) {
-            border(s_list_row[i], COL_SEL, 3);
+    }
+
+    c = status_card(40, PET_UI_CARD_SCALE);
+    llabel(c, 40, 3, 80, &lv_font_montserrat_14, COL_INK, "Weight");
+    snprintf(buf, sizeof(buf), "%u g", (unsigned) s_snap.weight);
+    rlabel12(c, 188, 6, COL_INK, buf);
+
+    c = status_card(80, PET_UI_CARD_BOND);
+    llabel(c, 40, 3, 80, &lv_font_montserrat_14, COL_INK, "Bond");
+    snprintf(buf, sizeof(buf), "%u", (unsigned) s_snap.bond);
+    rlabel12(c, 188, 6, COL_SEL, buf);
+
+    c = status_card(120, PET_UI_CARD_WALLET);
+    snprintf(buf, sizeof(buf), "%lu G", (unsigned long) s_esnap.coins);
+    llabel(c, 40, 3, 120, &lv_font_montserrat_14, COL_INK, buf);
+    snprintf(buf, sizeof(buf), "%u shells", (unsigned) s_esnap.shells);
+    llabel(c, 40, 19, 120, &lv_font_montserrat_12, COL_SUB, buf);
+}
+
+static void status_page_vitals(void)
+{
+    static const char *const NAME[4] = { "Food", "Fun", "Health", "Energy" };
+    static const pet_ui_card_t ART[4] = {
+        PET_UI_CARD_FOODBOWL, PET_UI_CARD_FUNFACE,
+        PET_UI_CARD_HEALTH, PET_UI_CARD_BOLT,
+    };
+    static const uint32_t BAR_COL[4] = {
+        COL_GREEN, COL_YELLOW, COL_RED, COL_BLUE,
+    };
+    const uint8_t val[4] = {
+        s_snap.fullness, s_snap.happiness, s_snap.health, s_snap.energy,
+    };
+    char buf[8];
+    for (uint8_t i = 0; i < 4; i += 1) {
+        int32_t y = (int32_t) i * 40;
+        lv_obj_t *c = status_card(y, ART[i]);
+        llabel(c, 40, 3, 100, &lv_font_montserrat_14, COL_INK, NAME[i]);
+        meter100(c, 40, 22, val[i], BAR_COL[i]);
+        snprintf(buf, sizeof(buf), "%u", (unsigned) val[i]);
+        rlabel12(c, 188, 19, COL_INK, buf);
+    }
+}
+
+static void status_page_care(void)
+{
+    char buf[48];
+
+    lv_obj_t *c = status_card(0, PET_UI_CARD_BANDAID);
+    llabel(c, 40, 3, 120, &lv_font_montserrat_14, COL_INK, "Misses");
+    snprintf(buf, sizeof(buf), "small %d - big %d",
+             (int) s_snap.ledger.small, (int) s_snap.ledger.big);
+    llabel(c, 40, 19, 140, &lv_font_montserrat_12, COL_SUB, buf);
+
+    c = status_card(40, PET_UI_CARD_MEDAL);
+    llabel(c, 40, 3, 120, &lv_font_montserrat_14, COL_INK, "Top-ups");
+    snprintf(buf, sizeof(buf), "full %u - fun %u",
+             (unsigned) s_snap.ledger.full_topups,
+             (unsigned) s_snap.ledger.happy_topups);
+    llabel(c, 40, 19, 140, &lv_font_montserrat_12, COL_SUB, buf);
+
+    c = status_card(80, PET_UI_CARD_SNUB);
+    llabel(c, 40, 10, 80, &lv_font_montserrat_14, COL_INK, "Snubs");
+    snprintf(buf, sizeof(buf), "%u",
+             (unsigned) s_snap.ledger.perfunctory);
+    rlabel12(c, 188, 12, COL_INK, buf);
+
+    // Skills：M/B/A 三条 30x6 迷你蓝槽（槽位比例即数值，不写数字）。
+    c = status_card(120, PET_UI_CARD_STAR);
+    llabel(c, 40, 3, 100, &lv_font_montserrat_14, COL_INK, "Skills");
+    static const char *const TAG[3] = { "M", "B", "A" };
+    const uint8_t sk[3] = {
+        s_snap.skill[PT_SKILL_MIND],
+        s_snap.skill[PT_SKILL_BODY],
+        s_snap.skill[PT_SKILL_ART],
+    };
+    for (uint8_t i = 0; i < 3; i += 1) {
+        int32_t lx = 38 + (int32_t) i * 44;
+        int32_t bx = lx + 9;
+        llabel(c, lx, 16, 8, &lv_font_montserrat_12, COL_INK, TAG[i]);
+        rect(c, bx, 20, 30, 6, 3, COL_PIP_OFF);
+        int32_t fw = (int32_t) sk[i] * 30 / 99;
+        if (fw < 3) {
+            fw = 3;
+        }
+        rect(c, bx, 20, fw, 6, 3, COL_BLUE);
+    }
+}
+
+// 页脚五控件重绘：‹ INFO VITALS CARE ›。激活段粉底，焦点段 2px 粉框，
+// 端点箭头在首页/末页变灰。
+static void status_footer_refresh(void)
+{
+    lv_obj_t *w[5];
+    bool disabled[5];
+    w[0] = s_sf_prev;
+    w[1] = s_sf_tab[0];
+    w[2] = s_sf_tab[1];
+    w[3] = s_sf_tab[2];
+    w[4] = s_sf_next;
+    disabled[0] = (s_status_page == 0);
+    disabled[1] = false;
+    disabled[2] = false;
+    disabled[3] = false;
+    disabled[4] = (s_status_page == 2);
+
+    for (uint8_t i = 0; i < 5; i += 1) {
+        bool on = ((int) i == s_status_focus);
+        bool is_tab = (i >= 1 && i <= 3);
+        bool active = is_tab && ((int) (i - 1) == s_status_page);
+        uint32_t fill = is_tab ? (active ? COL_TAB_ON : COL_DOCK_BG)
+                               : (disabled[i] ? COL_DIS_BG : COL_DOCK_BG);
+        lv_obj_set_style_bg_color(w[i], lv_color_hex(fill), 0);
+        if (on) {
+            border(w[i], COL_SEL, 2);
+        } else if (active) {
+            border(w[i], COL_SEL, 1);
         } else {
-            lv_obj_set_style_border_width(s_list_row[i], 0, 0);
+            border(w[i], disabled[i] ? COL_DIS_LINE : COL_INK, 1);
         }
+        lv_obj_t *txt = (lv_obj_t *) lv_obj_get_child(w[i], 0);
+        lv_obj_set_style_text_color(
+            txt, lv_color_hex(disabled[i] ? COL_DIS_TX : COL_INK), 0);
     }
 }
 
 static void status_build(void)
 {
     lv_obj_clean(s_modal_body);
-    char buf[48];
-
-    if (s_status_page == 0) {
-        lv_label_set_text(s_modal_title, "OVERVIEW  1/3");
-        snprintf(buf, sizeof(buf), "%s  %s", stage_name(s_snap.stage),
-                 species_name(s_snap.species));
-        label(s_modal_body, 4, 8, 168, &lv_font_montserrat_20, COL_INK, buf);
-        snprintf(buf, sizeof(buf), "Age: %d d", (int) s_snap.age_days);
-        label(s_modal_body, 4, 38, 168, &lv_font_montserrat_14, COL_INK, buf);
-        snprintf(buf, sizeof(buf), "Weight: %d", (int) s_snap.weight);
-        label(s_modal_body, 4, 66, 168, &lv_font_montserrat_14, COL_INK, buf);
-        snprintf(buf, sizeof(buf), "Bond: %d", (int) s_snap.bond);
-        label(s_modal_body, 4, 94, 168, &lv_font_montserrat_14, COL_INK, buf);
-        snprintf(buf, sizeof(buf), "Coins: %lu G",
-                 (unsigned long) s_esnap.coins);
-        label(s_modal_body, 4, 122, 168, &lv_font_montserrat_14, COL_YELLOW,
-              buf);
-        snprintf(buf, sizeof(buf), "Shells: %d", (int) s_esnap.shells);
-        label(s_modal_body, 4, 150, 168, &lv_font_montserrat_14, COL_BLUE,
-              buf);
-        // P2-S1：性格成年才揭晓（04 §7：保留观察乐趣）；成年生病时让位给提示行。
-        if (s_snap.stage >= PT_STAGE_ADULT && !s_snap.sick) {
-            snprintf(buf, sizeof(buf), "Trait: %s",
-                     pt_personality_name(
-                         (pt_personality_t) s_snap.genome.personality));
-            label(s_modal_body, 4, 172, 168, &lv_font_montserrat_14, COL_INK,
-                  buf);
-        }
-        if (s_snap.sick) {
-            label(s_modal_body, 4, 172, 168, &lv_font_montserrat_14, COL_RED,
-                  "Sick now");
-        }
-    } else if (s_status_page == 1) {
-        lv_label_set_text(s_modal_title, "METERS  2/3");
-        struct {
-            const char *name;
-            uint8_t value;
-            uint32_t color;
-        } meters[4] = {
-            { "Food", s_snap.fullness, COL_GREEN },
-            { "Fun", s_snap.happiness, COL_YELLOW },
-            { "Health", s_snap.health, COL_RED },
-            { "Energy", s_snap.energy, COL_BLUE },
-        };
-        for (int i = 0; i < 4; i += 1) {
-            int32_t y = 10 + i * 38;
-            label(s_modal_body, 2, y + 6, 44, &lv_font_montserrat_14, COL_INK,
-                  meters[i].name);
-            rect(s_modal_body, 50, y + 4, 100, 18, 9, COL_PIP_OFF);
-            int32_t fw = (int32_t) meters[i].value;   // 0..100 → 100px
-            lv_obj_t *fill = rect(s_modal_body, 50, y + 4, fw, 18, 9,
-                                  meters[i].color);
-            (void) fill;
-            snprintf(buf, sizeof(buf), "%d", (int) meters[i].value);
-            label(s_modal_body, 152, y + 6, 20, &lv_font_montserrat_14, COL_INK,
-                  buf);
-        }
-    } else {
-        lv_label_set_text(s_modal_title, "CARE  3/3");
-        snprintf(buf, sizeof(buf), "Small miss: %d", (int) s_snap.ledger.small);
-        label(s_modal_body, 4, 4, 168, &lv_font_montserrat_14, COL_INK, buf);
-        snprintf(buf, sizeof(buf), "Big miss: %d", (int) s_snap.ledger.big);
-        label(s_modal_body, 4, 24, 168, &lv_font_montserrat_14, COL_INK, buf);
-        snprintf(buf, sizeof(buf), "Full top-ups: %d",
-                 (int) s_snap.ledger.full_topups);
-        label(s_modal_body, 4, 44, 168, &lv_font_montserrat_14, COL_INK, buf);
-        snprintf(buf, sizeof(buf), "Fun top-ups: %d",
-                 (int) s_snap.ledger.happy_topups);
-        label(s_modal_body, 4, 64, 168, &lv_font_montserrat_14, COL_INK, buf);
-        snprintf(buf, sizeof(buf), "Snubs: %d",
-                 (int) s_snap.ledger.perfunctory);
-        label(s_modal_body, 4, 84, 168, &lv_font_montserrat_14, COL_INK, buf);
-
-        // 维度②技能（0–99）：MIND / BODY / ART。
-        struct {
-            const char *name;
-            uint8_t value;
-        } skills[PT_SKILL_COUNT] = {
-            { "Mind", s_snap.skill[PT_SKILL_MIND] },
-            { "Body", s_snap.skill[PT_SKILL_BODY] },
-            { "Art", s_snap.skill[PT_SKILL_ART] },
-        };
-        for (int i = 0; i < PT_SKILL_COUNT; i += 1) {
-            int32_t y = 112 + i * 20;
-            label(s_modal_body, 2, y, 44, &lv_font_montserrat_14, COL_INK,
-                  skills[i].name);
-            rect(s_modal_body, 50, y - 2, 100, 14, 7, COL_PIP_OFF);
-            rect(s_modal_body, 50, y - 2, skills[i].value, 14, 7, COL_BLUE);
-            snprintf(buf, sizeof(buf), "%d", (int) skills[i].value);
-            label(s_modal_body, 152, y, 20, &lv_font_montserrat_14, COL_INK,
-                  buf);
-        }
+    lv_obj_set_pos(s_modal_body, 8, 42);
+    lv_obj_set_size(s_modal_body, 192, 156);
+    show(s_mhair);
+    show(s_mback);
+    hide(s_mfooter);
+    show(s_sfooter);
+    hide(s_mcoin);
+    hide(s_mp_prev);
+    hide(s_mp_cur);
+    hide(s_mp_next);
+    hide(s_toast_box);
+    if (s_toast_timer != NULL) {
+        lv_timer_delete(s_toast_timer);
+        s_toast_timer = NULL;
     }
+
+    lv_label_set_text(s_modal_title, "STATUS");
+    if (s_status_page == 0) {
+        status_page_info();
+    } else if (s_status_page == 1) {
+        status_page_vitals();
+    } else {
+        status_page_care();
+    }
+    status_footer_refresh();
 }
 
 // ---------------------------------------------------------------------------
 // 商店 / 背包 / 每日签到（P1 经济）
 // ---------------------------------------------------------------------------
 
-enum {
-    SHOP_ROW_ITEM = 0,
-    SHOP_ROW_MORE,
-    SHOP_ROW_TAB,
-    SHOP_ROW_BONUS,
-    SHOP_ROW_STYLE,
-};
-
 static void style_open(void);
 
-static void shop_mark_rows(void)
+// 物品 → PV2 卡片缩略图。
+static const lv_image_dsc_t *item_card_art(pt_item_t id)
 {
-    for (uint8_t i = 0; i < s_shop_rows; i += 1) {
-        if (i == s_shop_sel) {
-            border(s_list_row[i], COL_SEL, 3);
-        } else {
-            lv_obj_set_style_border_width(s_list_row[i], 0, 0);
-        }
+    switch (id) {
+    case PT_ITEM_RICEBALL:  return pet_ui_card_dsc(PET_UI_CARD_RICEBALL);
+    case PT_ITEM_BISCUIT:   return pet_ui_card_dsc(PET_UI_CARD_BISCUIT);
+    case PT_ITEM_BENTO:     return pet_ui_card_dsc(PET_UI_CARD_BENTO);
+    case PT_ITEM_PUDDING:   return pet_ui_card_dsc(PET_UI_CARD_PUDDING);
+    case PT_ITEM_CAKE:      return pet_ui_card_dsc(PET_UI_CARD_CAKE);
+    case PT_ITEM_CREPE:     return pet_ui_card_dsc(PET_UI_CARD_CREPE);
+    case PT_ITEM_WATERMELON: return pet_ui_card_dsc(PET_UI_CARD_WATERMELON);
+    case PT_ITEM_BALL:      return pet_ui_card_dsc(PET_UI_CARD_BALL);
+    case PT_ITEM_MUSICBOX:  return pet_ui_card_dsc(PET_UI_CARD_MUSICBOX);
+    case PT_ITEM_BUBBLES:   return pet_ui_card_dsc(PET_UI_CARD_BUBBLES);
+    default:                return NULL;
     }
 }
 
-// 把当前页（s_shop_page）铺成行：签到格、物品格、More、Shop/Bag 切换，最多 6 行。
+// 效果心强度（绿=饱腹 / 黄=开心）：与定稿稿一致的风味强度，非精确数值。
+static void item_pips(pt_item_t id, uint8_t *g, uint8_t *yh)
+{
+    *g = 0;
+    *yh = 0;
+    switch (id) {
+    case PT_ITEM_RICEBALL:  *g = 1; break;
+    case PT_ITEM_BENTO:     *g = 2; break;
+    case PT_ITEM_WATERMELON: *g = 2; break;
+    case PT_ITEM_BISCUIT:   *yh = 2; break;
+    case PT_ITEM_PUDDING:  *yh = 2; break;
+    case PT_ITEM_CAKE:     *yh = 3; break;
+    case PT_ITEM_CREPE:     *yh = 3; break;
+    default: break;
+    }
+}
+
+// 把当前标签页下的条目展平成 s_seq 序列（签到 / Style 为虚拟行），重算页数。
+static void shop_seq_build(const uint16_t *items, uint8_t total, bool bonus)
+{
+    s_seq_n = 0;
+    if (!s_shop_bag) {
+        if (bonus) {
+            s_seq_kind[s_seq_n] = SEQ_BONUS;
+            s_seq_id[s_seq_n] = PT_ITEM_NONE;
+            s_seq_n += 1;
+        }
+        if (s_snap.stage >= PT_STAGE_TEEN) {
+            s_seq_kind[s_seq_n] = SEQ_STYLE;
+            s_seq_id[s_seq_n] = PT_ITEM_NONE;
+            s_seq_n += 1;
+        }
+    }
+    for (uint8_t i = 0; i < total && s_seq_n < SEQ_MAX; i += 1) {
+        s_seq_kind[s_seq_n] = SEQ_ITEM;
+        s_seq_id[s_seq_n] = items[i];
+        s_seq_n += 1;
+    }
+    s_shop_pages = (uint8_t) ((s_seq_n + 3) / 4);
+    if (s_shop_pages == 0) {
+        s_shop_pages = 1;
+    }
+}
+
+static uint8_t focus_index_of(uint8_t kind)
+{
+    for (uint8_t i = 0; i < s_focus_n; i += 1) {
+        if (s_focus_kind[i] == kind) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+static void shop_empty_bag(void)
+{
+    // 48px 空包图（28 原图 2x，绕中心缩放）。
+    lv_obj_t *img = icon_img(s_modal_body, 82, 42,
+                             pet_ui_card_dsc(PET_UI_CARD_EMPTY));
+    lv_obj_set_style_transform_pivot_x(img, 14, 0);
+    lv_obj_set_style_transform_pivot_y(img, 14, 0);
+    lv_obj_set_style_transform_scale(img, 512, 0);
+    label(s_modal_body, 0, 88, 192, &lv_font_montserrat_14, COL_INK,
+          "The bag is empty");
+    label(s_modal_body, 0, 110, 192, &lv_font_montserrat_12, COL_SUB,
+          "Pick treats in Shop");
+}
+
+// 单件物品卡（货架 / 背包两种右挂件）。
+static void shop_item_card(uint8_t slot, uint16_t id16)
+{
+    pt_item_t id = (pt_item_t) id16;
+    const pt_item_def_t *d = pt_item_def(id);
+    if (d == NULL) {
+        return;
+    }
+    uint8_t gh = 0, yh = 0;
+    item_pips(id, &gh, &yh);
+    const char *sub = "";
+    uint8_t right = RIGHT_NONE;
+    uint32_t price = 0, old_price = 0;
+    uint8_t qty = 0;
+
+    if (s_shop_bag) {
+        if (d->kind == PT_ITEM_KIND_TOY) {
+            sub = "today";
+            right = RIGHT_PLAY;
+            qty = (uint8_t) (PT_ECON_TOY_USES_DAY - s_esnap.toy_uses[id]);
+        } else {
+            sub = "OK to eat";
+            right = RIGHT_QTY;
+            qty = pt_econ_count(&s_esnap, id);
+        }
+    } else {
+        sub = (d->kind == PT_ITEM_KIND_TOY) ? "3 plays / day"
+              : (d->food_class == PT_FOOD_MEAL ? "meal" : "snack");
+        bool owned = d->kind == PT_ITEM_KIND_TOY
+                     && pt_econ_count(&s_esnap, id) > 0;
+        if (owned) {
+            right = RIGHT_OWNED;
+        } else {
+            price = pt_econ_item_price_now(d->price, s_snap.day_id);
+            old_price = d->price;
+            if (pt_econ_sale_pct(s_snap.day_id, false) >= 20 && price < old_price) {
+                right = RIGHT_SALE;
+            } else {
+                right = RIGHT_PRICE;
+            }
+        }
+    }
+    pv2_card(slot, (int32_t) slot * 40, item_card_art(id), d->name,
+             gh, yh, sub, COL_CARD_WHITE, right, price, old_price, qty);
+}
+
+// 把当前页（s_shop_page）铺成卡片 + 页脚，并重建扁平焦点槽。
 static void shop_build(void)
 {
     lv_obj_clean(s_modal_body);
-    memset(s_list_row, 0, sizeof(s_list_row));
-    s_shop_rows = 0;
+    memset(s_pv2_card, 0, sizeof(s_pv2_card));
+    s_focus_n = 0;
+
+    frame_pv2(true);
+    lv_label_set_text(s_modal_title, s_shop_bag ? "BAG" : "SHOP");
+    chrome_coins(s_esnap.coins);
 
     uint16_t items[PT_ECON_INV_SLOTS];
     uint8_t total = 0;
     bool bonus = false;
-
     if (!s_shop_bag) {
         total = pt_econ_shop_build(&s_esnap, s_snap.stage, s_snap.minute,
-                                   items, (uint8_t) (sizeof(items)
-                                                     / sizeof(items[0])));
+                                  items, (uint8_t) (sizeof(items)
+                                                    / sizeof(items[0])));
         bonus = s_shop_page == 0
                 && pt_econ_can_checkin(&s_esnap, s_snap.day_id);
     } else {
@@ -973,118 +1646,57 @@ static void shop_build(void)
             }
         }
     }
-
-    // 变页宽分页：除 Shop/Bag 页签外可用 5 行；首页签到再占 1；少年起 Style 占 1；
-    // 放不下时再留 More。
-    if (s_shop_page > 0 && total == 0) {
-        s_shop_page = 0;   // 防御：背包空时不允许停在不存在的页
+    shop_seq_build(items, total, bonus);
+    if (s_shop_page >= s_shop_pages) {
+        s_shop_page = (uint8_t) (s_shop_pages - 1);
     }
-    bool style_open = s_snap.stage >= PT_STAGE_TEEN;
-    uint8_t page = 0;
-    uint8_t pos = 0;
-    for (;;) {
-        uint8_t fixed = (uint8_t) (1 + (style_open ? 1 : 0));
-        uint8_t budget = (uint8_t) (5 - fixed);
-        bool page_bonus = (page == 0 && bonus);
-        if (page_bonus) {
-            budget = (uint8_t) (budget - 1);
+
+    uint8_t start = (uint8_t) (s_shop_page * 4);
+    if (s_shop_bag && s_seq_n == 0) {
+        shop_empty_bag();
+    } else {
+        for (uint8_t i = 0; i < 4 && start + i < s_seq_n; i += 1) {
+            uint8_t seq = (uint8_t) (start + i);
+            uint8_t kind = s_seq_kind[seq];
+            if (kind == SEQ_BONUS) {
+                pv2_card(i, (int32_t) i * 40,
+                         pet_ui_card_dsc(PET_UI_CARD_GIFT), "Daily bonus",
+                         0, 0, "+20 G every day", COL_CARD_GIFT,
+                         RIGHT_GET, 0, 0, 0);
+            } else if (kind == SEQ_STYLE) {
+                lv_obj_t *r = pv2_card(i, (int32_t) i * 40, NULL, "Style",
+                                        0, 0, "room & wear",
+                                        COL_CARD_GREENBG, RIGHT_GO, 0, 0, 0);
+                icon_img(r, 6, 5, pet_ui_deco_dsc(PET_UI_DECO_PLANT));
+            } else {
+                shop_item_card(i, s_seq_id[seq]);
+            }
+            focus_add(PV2_F_CARD, i);
         }
-        uint8_t remaining = (uint8_t) (total - pos);
-        bool has_more = remaining > budget;
-        uint8_t take = has_more ? (uint8_t) (budget - 1) : remaining;
-
-        if (page == s_shop_page) {
-            char buf[28];
-            uint8_t row = 0;
-            if (page_bonus) {
-                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
-                                   184, 25, 8, COL_YELLOW);
-                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_DIM,
-                      "Daily bonus 20G");
-                s_list_row[row] = r;
-                s_shop_row_kind[row] = SHOP_ROW_BONUS;
-                s_shop_row_item[row] = PT_ITEM_NONE;
-                row += 1;
-            }
-            for (uint8_t i = 0; i < take; i += 1) {
-                uint16_t id = items[pos + i];
-                const pt_item_def_t *d = pt_item_def((pt_item_t) id);
-                if (d == NULL) {
-                    continue;
-                }
-                if (!s_shop_bag) {
-                    bool owned = d->kind == PT_ITEM_KIND_TOY
-                                 && pt_econ_count(&s_esnap, (pt_item_t) id) > 0;
-                    if (owned) {
-                        snprintf(buf, sizeof(buf), "%s (owned)", d->name);
-                    } else {
-                        // S5：折扣日显示折后价（食物/玩具仅全场 8 折）。
-                        uint32_t now = pt_econ_item_price_now(d->price,
-                                                              s_snap.day_id);
-                        snprintf(buf, sizeof(buf), "%s  %luG", d->name,
-                                 (unsigned long) now);
-                    }
-                } else if (d->kind == PT_ITEM_KIND_TOY) {
-                    uint8_t left = (uint8_t) (PT_ECON_TOY_USES_DAY
-                                              - s_esnap.toy_uses[id]);
-                    snprintf(buf, sizeof(buf), "%s  play (%d)", d->name,
-                             (int) left);
-                } else {
-                    snprintf(buf, sizeof(buf), "%s  x%d", d->name,
-                             (int) pt_econ_count(&s_esnap, (pt_item_t) id));
-                }
-                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
-                                   184, 25, 8, COL_PANEL);
-                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_INK, buf);
-                s_list_row[row] = r;
-                s_shop_row_kind[row] = SHOP_ROW_ITEM;
-                s_shop_row_item[row] = id;
-                row += 1;
-            }
-            if (has_more) {
-                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
-                                   184, 25, 8, COL_PANEL);
-                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_BLUE,
-                      "More >>");
-                s_list_row[row] = r;
-                s_shop_row_kind[row] = SHOP_ROW_MORE;
-                s_shop_row_item[row] = PT_ITEM_NONE;
-                row += 1;
-            }
-            if (style_open) {
-                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
-                                   184, 25, 8, COL_GREEN);
-                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_PANEL,
-                      "Style >>");
-                s_list_row[row] = r;
-                s_shop_row_kind[row] = SHOP_ROW_STYLE;
-                s_shop_row_item[row] = PT_ITEM_NONE;
-                row += 1;
-            }
-            lv_obj_t *tab = rect(s_modal_body, 4, 4 + (int32_t) row * 28, 184,
-                                 25, 8, COL_DOCK_BG);
-            label(tab, 0, 3, 184, &lv_font_montserrat_14, COL_INK,
-                  s_shop_bag ? "<< Shop" : "Bag >>");
-            s_list_row[row] = tab;
-            s_shop_row_kind[row] = SHOP_ROW_TAB;
-            s_shop_row_item[row] = PT_ITEM_NONE;
-            row += 1;
-            s_shop_rows = row;
-            break;
-        }
-        pos = (uint8_t) (pos + take);
-        page += 1;
     }
 
-    if (s_shop_sel >= s_shop_rows) {
-        s_shop_sel = (uint8_t) (s_shop_rows - 1);
+    // 页脚：翻页键 + SHOP/BAG 段；激活段粉底。
+    footer_layout(s_shop_pages > 1);
+    lv_obj_set_style_bg_color(s_ft_shop,
+                              lv_color_hex(s_shop_bag ? COL_DOCK_BG : COL_TAB_ON),
+                              0);
+    lv_obj_set_style_bg_color(s_ft_bag,
+                              lv_color_hex(s_shop_bag ? COL_TAB_ON : COL_DOCK_BG),
+                              0);
+    if (s_shop_pages > 1) {
+        chrome_pager(s_shop_page, s_shop_pages);
+        focus_add(PV2_F_PREV, 0);
+    }
+    focus_add(PV2_F_SHOP, 0);
+    focus_add(PV2_F_BAG, 0);
+    if (s_shop_pages > 1) {
+        focus_add(PV2_F_NEXT, 0);
     }
 
-    char title[24];
-    snprintf(title, sizeof(title), "%s  %luG", s_shop_bag ? "BAG" : "SHOP",
-             (unsigned long) s_esnap.coins);
-    lv_label_set_text(s_modal_title, title);
-    shop_mark_rows();
+    if (s_shop_sel >= s_focus_n) {
+        s_shop_sel = 0;
+    }
+    pv2_mark(s_shop_sel, true);
 }
 
 static void shop_open(void)
@@ -1102,42 +1714,26 @@ static void shop_open(void)
 static void shop_buy_msg(pt_econ_rv_t rv)
 {
     switch (rv) {
-    case PT_ECON_NO_MONEY: set_msg("Not enough G", 1100); break;
-    case PT_ECON_OWNED: set_msg("Already owned", 1100); break;
-    case PT_ECON_LOCKED: set_msg("Locked", 1100); break;
-    case PT_ECON_NOT_ON_SHELF: set_msg("Not on shelf", 1100); break;
-    default: set_msg("Can't buy", 1000); break;
+    case PT_ECON_NO_MONEY: toast_show("Not enough G"); break;
+    case PT_ECON_OWNED: toast_show("Already owned"); break;
+    case PT_ECON_LOCKED: toast_show("Locked"); break;
+    case PT_ECON_NOT_ON_SHELF: toast_show("Not on shelf"); break;
+    default: toast_show("Can't buy"); break;
     }
 }
 
-static void shop_activate_row(void)
+static void shop_activate_seq(uint8_t seq)
 {
-    uint8_t kind = s_shop_row_kind[s_shop_sel];
-    uint16_t id16 = s_shop_row_item[s_shop_sel];
-    pt_item_t item = (pt_item_t) id16;
+    uint8_t kind = s_seq_kind[seq];
+    pt_item_t item = (pt_item_t) s_seq_id[seq];
 
-    if (kind == SHOP_ROW_STYLE) {
+    if (kind == SEQ_STYLE) {
         style_open();
         return;
     }
-    if (kind == SHOP_ROW_TAB) {
-        s_shop_bag = !s_shop_bag;
-        s_shop_page = 0;
-        s_shop_sel = 0;
-        shop_build();
-        pet_audio_play(SND_CONFIRM);
-        return;
-    }
-    if (kind == SHOP_ROW_MORE) {
-        s_shop_page += 1;
-        s_shop_sel = 0;
-        shop_build();
-        pet_audio_play(SND_CONFIRM);
-        return;
-    }
-    if (kind == SHOP_ROW_BONUS) {
+    if (kind == SEQ_BONUS) {
         pet_app_econ_checkin();
-        set_msg("20G  thank you!", 1200);
+        toast_show("20 G  thank you!");
         s_shop_dirty = true;
         return;
     }
@@ -1154,7 +1750,7 @@ static void shop_activate_row(void)
         }
         pet_app_econ_buy(item);
         s_shop_dirty = true;
-        set_msg("Bought!", 800);
+        toast_show("Bought!");
         return;
     }
 
@@ -1163,20 +1759,20 @@ static void shop_activate_row(void)
         pt_econ_t trial = s_esnap;
         pt_econ_rv_t rv = pt_econ_use_toy(&trial, item);
         if (rv != PT_ECON_OK) {
-            set_msg(rv == PT_ECON_USES_EXHAUSTED ? "Played out today"
-                                                 : "Can't play", 1100);
+            toast_show(rv == PT_ECON_USES_EXHAUSTED ? "Played out today"
+                                                    : "Can't play");
             pet_audio_play(SND_CANCEL);
             return;
         }
         pet_app_econ_play(item);
         s_shop_dirty = true;
-        set_msg("Fun!", 800);
+        toast_show("Fun!");
         return;
     }
 
     pt_econ_t trial = s_esnap;
     if (pt_econ_take_food(&trial, item) != PT_ECON_OK) {
-        set_msg("No stock", 1000);
+        toast_show("No stock");
         pet_audio_play(SND_CANCEL);
         return;
     }
@@ -1187,16 +1783,59 @@ static void shop_activate_row(void)
     modal_close();
 }
 
+static void shop_activate_focus(void)
+{
+    uint8_t kind = s_focus_kind[s_shop_sel];
+    uint8_t param = s_focus_param[s_shop_sel];
+
+    if (kind == PV2_F_CARD) {
+        uint8_t seq = (uint8_t) (s_shop_page * 4 + param);
+        if (seq < s_seq_n) {
+            shop_activate_seq(seq);
+        }
+        return;
+    }
+    if (kind == PV2_F_PREV) {
+        if (s_shop_page > 0) {
+            s_shop_page -= 1;
+            s_shop_sel = 0;
+            shop_build();
+            pet_audio_play(SND_CONFIRM);
+        }
+        return;
+    }
+    if (kind == PV2_F_NEXT) {
+        if (s_shop_page + 1 < s_shop_pages) {
+            s_shop_page += 1;
+            s_shop_sel = 0;
+            shop_build();
+            pet_audio_play(SND_CONFIRM);
+        }
+        return;
+    }
+    if (kind == PV2_F_SHOP || kind == PV2_F_BAG) {
+        bool want_bag = (kind == PV2_F_BAG);
+        if (s_shop_bag != want_bag) {
+            s_shop_bag = want_bag;
+            s_shop_page = 0;
+            shop_build();
+            s_shop_sel = focus_index_of(want_bag ? PV2_F_BAG : PV2_F_SHOP);
+            pv2_mark(s_shop_sel, true);
+            pet_audio_play(SND_CONFIRM);
+        }
+    }
+}
+
 static void handle_shop_key(pet_ui_action_t act)
 {
     if (act == PET_UI_ACT_PREV) {
-        s_shop_sel = (uint8_t) ((s_shop_sel + s_shop_rows - 1) % s_shop_rows);
-        shop_mark_rows();
+        s_shop_sel = (uint8_t) ((s_shop_sel + s_focus_n - 1) % s_focus_n);
+        pv2_mark(s_shop_sel, true);
     } else if (act == PET_UI_ACT_NEXT) {
-        s_shop_sel = (uint8_t) ((s_shop_sel + 1) % s_shop_rows);
-        shop_mark_rows();
+        s_shop_sel = (uint8_t) ((s_shop_sel + 1) % s_focus_n);
+        pv2_mark(s_shop_sel, true);
     } else if (act == PET_UI_ACT_CONFIRM) {
-        shop_activate_row();
+        shop_activate_focus();
     } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
         pet_audio_play(SND_CANCEL);
         modal_close();
@@ -1526,25 +2165,69 @@ static void handle_style_key(pet_ui_action_t act)
 static void checkin_build(void)
 {
     lv_obj_clean(s_modal_body);
+    // PV2 batch2：发丝线沿用，但主体下延到面板底边容纳 OK/skip 两行提示，
+    // 页脚与通用 hold-OK 提示都隐藏（自带操作提示）。
+    lv_obj_set_pos(s_modal_body, 8, 42);
+    lv_obj_set_size(s_modal_body, 192, 196);
+    show(s_mhair);
+    hide(s_mcoin);
+    hide(s_mp_prev);
+    hide(s_mp_cur);
+    hide(s_mp_next);
+    hide(s_mfooter);
+    hide(s_sfooter);
+    hide(s_mback);
+    hide(s_toast_box);
+    if (s_toast_timer != NULL) {
+        lv_timer_delete(s_toast_timer);
+        s_toast_timer = NULL;
+    }
     lv_label_set_text(s_modal_title, "DAILY BONUS");
 
-    uint16_t next_day = (uint16_t) (s_esnap.streak + 1);
-    char buf[40];
-    if (next_day >= 7) {
-        label(s_modal_body, 4, 24, 184, &lv_font_montserrat_20, COL_INK,
-              "7-day streak!");
-        label(s_modal_body, 4, 70, 184, &lv_font_montserrat_20, COL_YELLOW,
-              "100 G");
-        label(s_modal_body, 4, 106, 184, &lv_font_montserrat_14, COL_INK,
-              "+ 1 shell ticket");
-    } else {
-        snprintf(buf, sizeof(buf), "Day %d of 7", (int) next_day);
-        label(s_modal_body, 4, 30, 184, &lv_font_montserrat_14, COL_INK, buf);
-        label(s_modal_body, 4, 70, 184, &lv_font_montserrat_20, COL_YELLOW,
-              "20 G");
+    char buf[24];
+    uint16_t day = (uint16_t) (s_esnap.streak + 1);
+    bool week = day >= 7;
+
+    // 56x56 礼品图（28px 位图整倍放大，pivot 在 28 盒中心）。
+    lv_obj_t *gift = icon_img(s_modal_body, 68, 12,
+                              pet_ui_card_dsc(PET_UI_CARD_GIFT));
+    lv_obj_set_style_transform_pivot_x(gift, 14, 0);
+    lv_obj_set_style_transform_pivot_y(gift, 14, 0);
+    lv_obj_set_style_transform_scale(gift, 512, 0);
+
+    snprintf(buf, sizeof(buf), "Day %u of 7", (unsigned) day);
+    label(s_modal_body, 0, 85, 192, &lv_font_montserrat_14, COL_INK,
+          week ? "7-day streak!" : buf);
+
+    // 7 连签小灯：已领黄、今天粉、未到灰。
+    for (uint8_t i = 0; i < 7; i += 1) {
+        int32_t x = 53 + (int32_t) i * 13;
+        if ((uint16_t) i < day - 1U) {
+            lv_obj_t *d = rect(s_modal_body, x, 108, 7, 7, 2, COL_COIN_BG);
+            border(d, COL_INK, 1);
+        } else if ((uint16_t) i == day - 1U) {
+            lv_obj_t *d = rect(s_modal_body, x, 108, 7, 7, 2, COL_TAB_ON);
+            border(d, COL_INK, 1);
+        } else {
+            rect(s_modal_body, x, 108, 7, 7, 2, COL_PIP_OFF);
+        }
     }
-    label(s_modal_body, 4, 150, 184, &lv_font_montserrat_14, COL_DIM,
-          "OK to claim");
+
+    int32_t pw = week ? 76 : 64;
+    lv_obj_t *pill = rect(s_modal_body, (192 - pw) / 2, 124, pw, 20, 10,
+                          COL_COIN_BG);
+    border(pill, COL_INK, 1);
+    label(pill, 0, 3, pw, &lv_font_montserrat_12, COL_INK,
+          week ? "100 G" : "20 G");
+
+    if (week) {
+        label(s_modal_body, 0, 150, 192, &lv_font_montserrat_12, COL_BLUE,
+              "+1 shell ticket");
+    }
+    label(s_modal_body, 0, 161, 192, &lv_font_montserrat_12, COL_INK,
+          "OK - claim");
+    label(s_modal_body, 0, 177, 192, &lv_font_montserrat_12, COL_HINT,
+          "hold OK - skip");
 }
 
 static void checkin_open(void)
@@ -2397,34 +3080,86 @@ static void handle_dex_key(pet_ui_action_t act)
 
 static void game_set_choice_visual(void)
 {
+    // 选中：粉底粉框墨字；常态：HIGH 浅绿 / LOW 浅蓝，墨框本色字。
     bool hi = s_g_choice == PET_GAME_HIGH;
-    border(s_game_hi, hi ? COL_SEL : COL_INK, hi ? 3 : 1);
-    border(s_game_lo, !hi ? COL_SEL : COL_INK, !hi ? 3 : 1);
+    lv_obj_set_style_bg_color(s_game_hi,
+                              lv_color_hex(hi ? COL_CARD_PINK
+                                              : COL_CARD_GREENBG), 0);
+    border(s_game_hi, hi ? COL_SEL : COL_INK, hi ? 2 : 1);
+    lv_obj_set_style_text_color((lv_obj_t *) lv_obj_get_child(s_game_hi, 0),
+                                lv_color_hex(hi ? COL_INK : COL_GREEN), 0);
+    lv_obj_set_style_bg_color(s_game_lo,
+                              lv_color_hex(hi ? COL_BADGE_BLUE
+                                              : COL_CARD_PINK), 0);
+    border(s_game_lo, hi ? COL_INK : COL_SEL, hi ? 1 : 2);
+    lv_obj_set_style_text_color((lv_obj_t *) lv_obj_get_child(s_game_lo, 0),
+                                lv_color_hex(hi ? COL_BLUE : COL_INK), 0);
+}
+
+// 两键恢复常态（结果态：无焦点）。
+static void game_buttons_idle(void)
+{
+    lv_obj_set_style_bg_color(s_game_hi,
+                              lv_color_hex(COL_CARD_GREENBG), 0);
+    border(s_game_hi, COL_INK, 1);
+    lv_obj_set_style_text_color((lv_obj_t *) lv_obj_get_child(s_game_hi, 0),
+                                lv_color_hex(COL_GREEN), 0);
+    lv_obj_set_style_bg_color(s_game_lo, lv_color_hex(COL_BADGE_BLUE), 0);
+    border(s_game_lo, COL_INK, 1);
+    lv_obj_set_style_text_color((lv_obj_t *) lv_obj_get_child(s_game_lo, 0),
+                                lv_color_hex(COL_BLUE), 0);
+}
+
+static void game_pips_refresh(uint8_t wins)
+{
+    for (uint8_t i = 0; i < 5; i += 1) {
+        bool on = i < wins;
+        lv_obj_set_style_bg_color(s_game_pip[i],
+                                  lv_color_hex(on ? COL_COIN_BG
+                                                  : COL_PIP_OFF), 0);
+        border(s_game_pip[i], on ? COL_INK : COL_INK, on ? 1 : 0);
+    }
 }
 
 static void game_build(void)
 {
     lv_obj_clean(s_modal_body);
-    lv_label_set_text(s_modal_title, "HIGH-LOW");
+    memset(s_pv2_card, 0, sizeof(s_pv2_card));
+    frame_pv2(false);
+    lv_label_set_text(s_modal_title, "HI-LOW");
 
-    char buf[24];
-    snprintf(buf, sizeof(buf), "[ %d ]", (int) pet_game_first_card(&s_game));
-    s_game_card = label(s_modal_body, 4, 6, 168, &lv_font_montserrat_20, COL_INK,
-                        buf);
+    char buf[16];
+    // 中央卡 64x62
+    s_game_box = rect(s_modal_body, 64, 10, 64, 62, 10, COL_CARD_WHITE);
+    border(s_game_box, COL_INK, 1);
+    snprintf(buf, sizeof(buf), "[ %d ]",
+             (int) pet_game_first_card(&s_game));
+    s_game_card = label(s_game_box, 0, 21, 64, &lv_font_montserrat_20,
+                        COL_INK, buf);
+    s_game_sub = label(s_game_box, 0, 12, 64, &lv_font_montserrat_12,
+                       COL_SUB, "");
+    s_game_result = label(s_game_box, 0, 30, 64, &lv_font_montserrat_20,
+                          COL_INK, "");
+    hide(s_game_sub);
+    hide(s_game_result);
 
-    s_game_hi = rect(s_modal_body, 10, 44, 72, 30, 8, COL_PANEL);
-    label(s_game_hi, 0, 5, 72, &lv_font_montserrat_14, COL_GREEN, "HIGH");
-    s_game_lo = rect(s_modal_body, 96, 44, 72, 30, 8, COL_PANEL);
-    label(s_game_lo, 0, 5, 72, &lv_font_montserrat_14, COL_BLUE, "LOW");
+    // HIGH / LOW
+    s_game_hi = rect(s_modal_body, 2, 80, 84, 30, 9, COL_CARD_GREENBG);
+    label(s_game_hi, 0, 7, 84, &lv_font_montserrat_14, COL_GREEN, "HIGH");
+    s_game_lo = rect(s_modal_body, 106, 80, 84, 30, 9, COL_BADGE_BLUE);
+    label(s_game_lo, 0, 7, 84, &lv_font_montserrat_14, COL_BLUE, "LOW");
     game_set_choice_visual();
 
-    s_game_result = label(s_modal_body, 4, 82, 168, &lv_font_montserrat_20,
-                          COL_INK, "");
-    snprintf(buf, sizeof(buf), "Wins: %d", (int) pet_game_wins(&s_game));
-    s_game_wins = label(s_modal_body, 4, 120, 168, &lv_font_montserrat_14,
-                        COL_INK, buf);
-    s_game_hint = label(s_modal_body, 4, 146, 168, &lv_font_montserrat_14,
-                        COL_INK, "UP/DOWN choose  OK deal");
+    // 5 档胜场灯
+    for (uint8_t i = 0; i < 5; i += 1) {
+        s_game_pip[i] = rect(s_modal_body, 82 + (int32_t) i * 8, 112,
+                             6, 6, 2, COL_PIP_OFF);
+    }
+    game_pips_refresh((uint8_t) pet_game_wins(&s_game));
+
+    s_game_hint = label(s_modal_body, 0, 132, 192,
+                        &lv_font_montserrat_12, COL_HINT,
+                        "UP/DOWN choose  OK deal");
 }
 
 static void game_open(void)
@@ -2495,7 +3230,6 @@ static void game_exit(void)
 
 static void game_key_click(pet_btn_t btn)
 {
-    char buf[32];
     if (s_g_phase == PHASE_CHOOSE) {
         if (btn == PET_BTN_UP) {
             s_g_choice = PET_GAME_HIGH;
@@ -2508,10 +3242,20 @@ static void game_key_click(pet_btn_t btn)
         } else if (btn == PET_BTN_OK) {
             pet_game_result_t r = pet_game_choose(&s_game, s_g_choice);
             s_g_phase = PHASE_RESULT;
+            char cap[16];
+            snprintf(cap, sizeof(cap), "%d -> %d",
+                     (int) pet_game_first_card(&s_game),
+                     (int) pet_game_second_card(&s_game));
+            lv_label_set_text(s_game_sub, cap);
+            show(s_game_sub);
+            hide(s_game_card);
             if (r == PET_GAME_WIN) {
                 lv_label_set_text(s_game_result, "WIN!");
                 lv_obj_set_style_text_color(s_game_result,
                                             lv_color_hex(COL_GREEN), 0);
+                lv_obj_set_style_bg_color(s_game_box,
+                                          lv_color_hex(COL_CARD_GREENBG), 0);
+                border(s_game_box, COL_GREEN, 1);
                 pet_audio_play(SND_HAPPY);
             } else if (r == PET_GAME_LOSE) {
                 lv_label_set_text(s_game_result, "LOST");
@@ -2524,14 +3268,10 @@ static void game_key_click(pet_btn_t btn)
                                             lv_color_hex(COL_INK), 0);
                 pet_audio_play(SND_CONFIRM);
             }
-            snprintf(buf, sizeof(buf), "Second: %d",
-                     (int) pet_game_second_card(&s_game));
-            label(s_modal_body, 4, 100, 168, &lv_font_montserrat_14, COL_INK,
-                  buf);   // 临时说明行
-            snprintf(buf, sizeof(buf), "Wins: %d",
-                     (int) pet_game_wins(&s_game));
-            lv_label_set_text(s_game_wins, buf);
-            lv_label_set_text(s_game_hint, "OK next");
+            show(s_game_result);
+            game_buttons_idle();
+            game_pips_refresh((uint8_t) pet_game_wins(&s_game));
+            lv_label_set_text(s_game_hint, "OK - next");
         }
     } else {
         // RESULT：OK 进入下一局（TIE 时第一张已在 choose 内重发）。
@@ -2555,9 +3295,27 @@ static void game_key_click(pet_btn_t btn)
 static const char *const GAMES_NAME[PT_GAME_COUNT] = {
     "Hi-Lo", "Rhythm", "Catch", "Memory", "Walk", "Prefer",
 };
+static const char *const GAMES_TITLE[PT_GAME_COUNT] = {
+    "HI-LOW", "RHYTHM", "CATCH", "MEMORY", "WALK", "PREFER",
+};
 static const char *const GAMES_SKILL[PT_GAME_COUNT] = {
     "Mind", "Art", "Body", "Mind", "Body", "Bond",
 };
+static const char *const GAMES_HINT[PT_GAME_COUNT] = {
+    "pick hi / lo", "tap the beat", "move 3 lanes",
+    "repeat pads", "jump or duck", "read the mood",
+};
+static const pet_ui_card_t GAMES_ART[PT_GAME_COUNT] = {
+    PET_UI_CARD_HILO, PET_UI_CARD_RHYTHM, PET_UI_CARD_CATCH,
+    PET_UI_CARD_MEMORY, PET_UI_CARD_WALK, PET_UI_CARD_PREFER,
+};
+// 技能词配色（定稿 pv2-games.html）：mind 蓝 / art 黄 / body 绿 / bond 粉。
+static const uint32_t GAMES_SKILL_COL[PT_GAME_COUNT] = {
+    COL_BLUE, COL_YELLOW, COL_GREEN, COL_BLUE, COL_GREEN, COL_SEL,
+};
+// 两页：页 0 放 G1–G4，页 1 放 G5–G6。
+static const uint8_t GAMES_PAGE_FIRST[2] = { 0, 4 };
+static const uint8_t GAMES_PAGE_N[2] = { 4, 2 };
 
 // ---- 选择器 ---------------------------------------------------------------
 
@@ -2566,18 +3324,48 @@ static void gx_open(uint8_t id);   // G2–G6 运行时在下方定义
 static void games_build(void)
 {
     lv_obj_clean(s_modal_body);
+    memset(s_pv2_card, 0, sizeof(s_pv2_card));
+    frame_pv2(true);
+    footer_pager_only();
     lv_label_set_text(s_modal_title, "GAMES");
-    for (uint8_t i = 0; i < PT_GAME_COUNT; i += 1) {
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%s  %s", GAMES_NAME[i], GAMES_SKILL[i]);
-        lv_obj_t *r = rect(s_modal_body, 8, 6 + i * 27, 176, 24, 8, COL_PANEL);
-        label(r, 0, 3, 176, &lv_font_montserrat_14, COL_INK, buf);
-        s_games_row[i] = r;
+
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%u/2", (unsigned) (s_games_page + 1));
+    lv_label_set_text(s_mp_cur, buf);
+    lv_obj_set_pos(s_mp_cur, 91, 15);
+    show(s_mp_cur);
+
+    s_focus_n = 0;
+    uint8_t base = GAMES_PAGE_FIRST[s_games_page];
+    uint8_t n = GAMES_PAGE_N[s_games_page];
+    for (uint8_t i = 0; i < n; i += 1) {
+        uint8_t id = (uint8_t) (base + i);
+        int32_t y = (int32_t) i * 40;
+        lv_obj_t *r = rect(s_modal_body, 0, y, 192, 36, 10, COL_CARD_WHITE);
+        border(r, COL_INK, 1);
+        icon_img(r, 4, 4, pet_ui_card_dsc(GAMES_ART[id]));
+        llabel(r, 40, 3, 132, &lv_font_montserrat_14, COL_INK,
+               GAMES_NAME[id]);
+        llabel(r, 40, 19, 44, &lv_font_montserrat_12,
+               GAMES_SKILL_COL[id], GAMES_SKILL[id]);
+        char sub[24];
+        snprintf(sub, sizeof(sub), "- %s", GAMES_HINT[id]);
+        llabel(r, 40 + text_w12(GAMES_SKILL[id]) + 5, 19, 120,
+               &lv_font_montserrat_12, COL_SUB, sub);
+        s_pv2_card[i] = r;
+        s_pv2_card_bg[i] = COL_CARD_WHITE;
+        focus_add(PV2_F_CARD, i);
     }
-    for (uint8_t i = 0; i < PT_GAME_COUNT; i += 1) {
-        border(s_games_row[i], i == (uint8_t) s_games_sel ? COL_SEL : COL_INK,
-               i == (uint8_t) s_games_sel ? 3 : 1);
+    focus_add(PV2_F_PREV, 0);
+    focus_add(PV2_F_NEXT, 0);
+
+    if ((uint8_t) s_list_sel >= s_focus_n) {
+        s_list_sel = 0;
     }
+    // pv2_mark() 的端点失效样式读商店页码；GAMES 借用同一套页脚控件。
+    s_shop_page = s_games_page;
+    s_shop_pages = 2;
+    pv2_mark((uint8_t) s_list_sel, true);
 }
 
 static void games_open(void)
@@ -2587,7 +3375,8 @@ static void games_open(void)
         pet_audio_play(SND_SAD);
         return;
     }
-    s_games_sel = 0;
+    s_games_page = 0;
+    s_list_sel = 0;
     s_mode = MODE_GAMES;
     modal_open();
     games_build();
@@ -2596,20 +3385,40 @@ static void games_open(void)
 
 static void handle_games_key(pet_ui_action_t act)
 {
+    uint8_t slots = s_focus_n;
     if (act == PET_UI_ACT_PREV) {
-        s_games_sel = (s_games_sel + PT_GAME_COUNT - 1) % PT_GAME_COUNT;
-        games_build();
+        s_list_sel = (s_list_sel + slots - 1) % slots;
+        pv2_mark((uint8_t) s_list_sel, true);
         pet_audio_play(SND_CONFIRM);
     } else if (act == PET_UI_ACT_NEXT) {
-        s_games_sel = (s_games_sel + 1) % PT_GAME_COUNT;
-        games_build();
+        s_list_sel = (s_list_sel + 1) % slots;
+        pv2_mark((uint8_t) s_list_sel, true);
         pet_audio_play(SND_CONFIRM);
     } else if (act == PET_UI_ACT_CONFIRM) {
-        if (s_games_sel == PT_GAME_G1_HILO) {
-            s_g1_job = false;
-            game_open();           // G1 沿用既有界面
-        } else {
-            gx_open((uint8_t) s_games_sel);
+        uint8_t kind = s_focus_kind[s_list_sel];
+        uint8_t param = s_focus_param[s_list_sel];
+        if (kind == PV2_F_CARD) {
+            uint8_t id = (uint8_t) (GAMES_PAGE_FIRST[s_games_page] + param);
+            if (id == PT_GAME_G1_HILO) {
+                s_g1_job = false;
+                game_open();
+            } else {
+                gx_open(id);
+            }
+        } else if (kind == PV2_F_PREV) {
+            if (s_games_page > 0) {
+                s_games_page -= 1;
+                s_list_sel = 0;
+                games_build();
+                pet_audio_play(SND_CONFIRM);
+            }
+        } else if (kind == PV2_F_NEXT) {
+            if (s_games_page + 1 < 2) {
+                s_games_page += 1;
+                s_list_sel = 0;
+                games_build();
+                pet_audio_play(SND_CONFIRM);
+            }
         }
     } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
         pet_audio_play(SND_CANCEL);
@@ -2617,36 +3426,79 @@ static void handle_games_key(pet_ui_action_t act)
     }
 }
 
-// ---- GX 公共部件 ----------------------------------------------------------
+// ---- GX 公共部件（PV2 主体 192x156 局部坐标） ------------------------------
 
 static void gx_hide_all(void)
 {
-    for (uint8_t i = 0; i < 8; i += 1) {
+    for (uint8_t i = 0; i < GX_MK_N; i += 1) {
         hide(s_gx_mk[i]);
     }
     for (uint8_t i = 0; i < 4; i += 1) {
         hide(s_gx_ml[i]);
     }
+    for (uint8_t i = 0; i < GX_IMG_N; i += 1) {
+        hide(s_gx_img[i]);
+    }
+    hide(s_gx_card);
+    hide(s_gx_card_icon);
+    hide(s_gx_card_l1);
+    hide(s_gx_card_l2);
+    hide(s_gx_card_l3);
 }
 
-static void gx_mk(uint8_t i, int32_t x, int32_t y, int32_t w, int32_t h,
-                  uint32_t color)
+// 圆角色块：bw=0 时无边。
+static void gx_box(uint8_t i, int32_t x, int32_t y, int32_t w, int32_t h,
+                   int32_t rad, uint32_t fill, uint32_t bcol, int32_t bw)
 {
-    lv_obj_set_pos(s_gx_mk[i], x, y);
-    lv_obj_set_size(s_gx_mk[i], w, h);
-    lv_obj_set_style_bg_color(s_gx_mk[i], lv_color_hex(color), 0);
-    border(s_gx_mk[i], COL_INK, 0);
-    show(s_gx_mk[i]);
+    lv_obj_t *o = s_gx_mk[i];
+    lv_obj_set_pos(o, x, y);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_style_radius(o, rad, 0);
+    lv_obj_set_style_bg_color(o, lv_color_hex(fill), 0);
+    border(o, bcol, bw);
+    show(o);
 }
 
-static void gx_ml(uint8_t i, int32_t x, int32_t y, int32_t w, uint32_t color,
-                  const char *txt)
+static void gx_txt(uint8_t i, int32_t x, int32_t y, int32_t w, uint32_t color,
+                   const char *txt)
 {
     lv_obj_set_pos(s_gx_ml[i], x, y);
     lv_obj_set_width(s_gx_ml[i], w);
     lv_obj_set_style_text_color(s_gx_ml[i], lv_color_hex(color), 0);
     lv_label_set_text(s_gx_ml[i], txt);
     show(s_gx_ml[i]);
+}
+
+static void gx_img(uint8_t i, int32_t x, int32_t y,
+                   const lv_image_dsc_t *dsc)
+{
+    lv_image_set_src(s_gx_img[i], dsc);
+    lv_obj_set_pos(s_gx_img[i], x, y);
+    show(s_gx_img[i]);
+}
+
+// 顶部居中信息胶囊（奶底 r8；hot=粉，用于 WATCH 等强调态）。
+static void gx_info(const char *txt, bool hot)
+{
+    int32_t w = text_w12(txt) + 16;
+    if (w < 44) {
+        w = 44;
+    }
+    lv_obj_set_pos(s_gx_pill, 96 - w / 2, 0);
+    lv_obj_set_size(s_gx_pill, w, 16);
+    lv_obj_set_style_bg_color(s_gx_pill,
+                              lv_color_hex(hot ? COL_PILL_PINK : COL_DOCK_BG),
+                              0);
+    border(s_gx_pill, hot ? COL_SEL : COL_DOCK_EDGE, 1);
+    lv_label_set_text(s_gx_info, txt);
+    show(s_gx_pill);
+    show(s_gx_info);
+}
+
+static void gx_hint_set(const char *txt)
+{
+    lv_label_set_text(s_gx_hint, txt);
+    show(s_gx_hint);
 }
 
 static const char *gx_grade_word(uint8_t grade)
@@ -2661,55 +3513,83 @@ static const char *gx_grade_word(uint8_t grade)
 }
 
 static void gx_finish(void);
+static void gx_ready_chrome(void);
+static void gx_result_chrome(void);
 
 // ---- 各游戏绘制 -----------------------------------------------------------
 
 static void gx_render_g2(void)
 {
     gx_hide_all();
-    gx_mk(0, 10, 88, 176, 12, COL_PIP_OFF);                 // 判定条
-    gx_mk(1, 54, 88, 88, 12, COL_ROOM_TOP);                 // 中心区
-    int32_t cx = 14 + (s_g2.pos + 100) * 168 / 200;
-    gx_mk(2, cx - 4, 84, 8, 20, COL_SEL);                   // 游标
     char buf[24];
-    snprintf(buf, sizeof(buf), "Beat %d/5", s_g2.beat + (s_g2.done ? 0 : 1));
-    lv_label_set_text(s_gx_info, buf);
+    snprintf(buf, sizeof(buf), "BEAT %d/5",
+             s_g2.beat + (s_g2.done ? 0 : 1));
+    gx_info(buf, false);
+    gx_hint_set("OK - tap on center");
+    gx_box(0, 8, 52, 176, 14, 7, COL_DIS_BG, COL_INK, 0);      // 判定槽
+    gx_box(1, 66, 52, 60, 14, 7, COL_PLAY_SWEET, COL_INK, 0);  // 甜区
+    int32_t cx = 8 + (s_g2.pos + 100) * 176 / 200;
+    gx_box(2, cx - 2, 50, 4, 18, 2, COL_GREEN_DEEP, COL_INK, 0);
+    for (uint8_t i = 0; i < PET_G2_BEATS; i += 1) {
+        bool done = i < s_g2.beat;
+        bool cur = !s_g2.done && i == s_g2.beat;
+        gx_box(3 + i, 76 + (int32_t) i * 10, 82, 7, 7, 3,
+               done ? COL_GREEN : (cur ? COL_TAB_ON : COL_PIP_OFF),
+               COL_INK, (done || cur) ? 1 : 0);
+    }
 }
 
 static void gx_render_g3(void)
 {
     gx_hide_all();
-    gx_mk(0, 83, 26, 2, 128, COL_DOCK_BG);
-    gx_mk(1, 153, 26, 2, 128, COL_DOCK_BG);
-    // 玩家在底线
-    static const int32_t lane_x[3] = { 14, 89, 164 };
-    gx_mk(7, lane_x[s_g3.player], 152, 52, 8, COL_SEL);
-    uint8_t used = 2;
+    char buf[26];
+    snprintf(buf, sizeof(buf), "%ds  %d",
+             (int) ((PET_G3_TICKS - s_g3.tick + 9) / 10),
+             (int) s_g3.score);
+    gx_info(buf, false);
+    gx_hint_set("UP/DOWN - move");
+    // 三车道：当前车道白底，其余透明仅发丝线。
+    for (uint8_t i = 0; i < PET_G3_LANES; i += 1) {
+        gx_box(i, 8 + (int32_t) i * 58, 22, 56, 92, 8,
+               i == s_g3.player ? COL_CARD_WHITE : COL_PANEL,
+               COL_HAIR, 1);
+        if (i != s_g3.player) {
+            lv_obj_set_style_bg_opa(s_gx_mk[i], LV_OPA_TRANSP, 0);
+        }
+    }
+    // 掉落物：好=绿圆，坏=红方块。
+    uint8_t used = 3;
     for (uint8_t i = 0; i < 5; i += 1) {
-        if (s_g3.drops[i].lane < 0 || used >= 7) {
+        if (s_g3.drops[i].lane < 0 || used > 7) {
             continue;
         }
-        int32_t y = 150 - (4 - s_g3.drops[i].row) * 24;
-        gx_mk(used, lane_x[s_g3.drops[i].lane] + 18, y, 16, 14,
-              s_g3.drops[i].bad ? COL_RED : COL_GREEN);
+        int32_t cx = 36 + (int32_t) s_g3.drops[i].lane * 58;
+        int32_t y = 30 + (4 - s_g3.drops[i].row) * 20;
+        if (s_g3.drops[i].bad) {
+            gx_box(used, cx - 6, y, 12, 12, 3, COL_RED, COL_INK, 1);
+        } else {
+            gx_box(used, cx - 7, y - 1, 14, 14, 7, COL_GREEN, COL_INK, 1);
+        }
         used += 1;
     }
-    char buf[26];
-    snprintf(buf, sizeof(buf), "%2ds  %3d",
-             (int) ((PET_G3_TICKS - s_g3.tick + 9) / 10), (int) s_g3.score);
-    lv_label_set_text(s_gx_info, buf);
+    // 笑脸碗接球手。
+    int32_t px = 36 + (int32_t) s_g3.player * 58;
+    gx_box(8, px - 18, 104, 36, 12, 6, COL_CARD_WHITE, COL_INK, 1);
+    gx_box(9, px - 9, 96, 5, 5, 2, COL_TAB_ON, COL_INK, 1);
+    gx_box(10, px + 4, 96, 5, 5, 2, COL_TAB_ON, COL_INK, 1);
 }
 
+// G4 三块 A/B/C 垫（主体 y24/58/92）。
 static void gx_pads(bool lit_mode)
 {
     static const char *const PAD[3] = { "A", "B", "C" };
-    static const int32_t py[3] = { 36, 92, 148 };
+    uint8_t mark = lit_mode ? s_g4_lit : s_gx_sel;
     for (uint8_t i = 0; i < 3; i += 1) {
-        gx_mk(i, 14, py[i], 168, 40, COL_PANEL);
-        uint8_t mark = lit_mode ? s_g4_lit : s_gx_sel;
-        border(s_gx_mk[i], i == mark ? COL_SEL : COL_INK,
-               i == mark ? 3 : 1);
-        gx_ml(i, 14, py[i] + 9, 168, COL_INK, PAD[i]);
+        bool on = i == mark;
+        gx_box(i, 8, 24 + (int32_t) i * 34, 176, 30, 10,
+               on ? COL_CARD_PINK : COL_CARD_WHITE,
+               on ? COL_SEL : COL_INK, on ? 2 : 1);
+        gx_txt(i, 8, 31 + (int32_t) i * 34, 176, COL_INK, PAD[i]);
     }
 }
 
@@ -2717,39 +3597,51 @@ static void gx_render_g4(void)
 {
     gx_hide_all();
     if (s_g4.phase == PET_G4_SHOW) {
+        gx_info("WATCH...", true);
+        gx_hint_set("watch the pads");
         gx_pads(true);
-        lv_label_set_text(s_gx_info, "Watch...");
     } else {
-        gx_pads(false);
         char buf[20];
-        snprintf(buf, sizeof(buf), "Repeat %d/7",
+        snprintf(buf, sizeof(buf), "REPEAT %d/7",
                  s_g4.level > 7 ? 7 : (int) s_g4.level);
-        lv_label_set_text(s_gx_info, buf);
+        gx_info(buf, false);
+        gx_hint_set("UP/DOWN - OK");
+        gx_pads(false);
     }
 }
 
 static void gx_render_g5(void)
 {
     gx_hide_all();
-    gx_mk(0, 10, 124, 176, 3, COL_PIP_OFF);                 // 判定线
-    gx_mk(1, 24, 110, 12, 16, COL_BLUE);                    // 玩家
+    char buf[28];
+    snprintf(buf, sizeof(buf), "%d/%d  combo %d", (int) s_g5.cleared,
+             PET_G5_OBSTACLES, (int) s_g5.combo);
+    gx_info(buf, false);
+    gx_hint_set("UP jump  DOWN duck");
+    gx_box(0, 8, 106, 176, 2, 1, COL_INK, COL_INK, 0);          // 地面
+    gx_box(1, 24, 84, 20, 20, 7, COL_BADGE_BLUE, COL_INK, 1);  // 玩家
+    gx_box(2, 30, 91, 3, 3, 1, COL_INK, COL_INK, 0);           // 眼
+    gx_box(3, 27, 104, 5, 4, 2, COL_BLUE, COL_INK, 1);         // 腿
+    gx_box(4, 37, 104, 5, 4, 2, COL_BLUE, COL_INK, 1);
     if (s_g5.next_obs < PET_G5_OBSTACLES) {
         const pet_g5_obs_t *o = &s_g5.obs[s_g5.next_obs];
         int32_t d = o->arrive - s_g5.tick;
         int32_t x = 30 + d * 5;
-        if (x < 40) {
-            x = 40;
+        if (x < 48) {
+            x = 48;
         }
-        if (x > 182) {
-            x = 182;
+        if (x > 172) {
+            x = 172;
         }
-        gx_mk(2, x, 104, 12, 24,
-              o->action == PET_G5_UP ? COL_YELLOW : COL_GREEN);
+        if (o->action == PET_G5_UP) {
+            gx_box(5, x - 5, 90, 10, 16, 2, COL_COIN_BG, COL_INK, 1);
+        } else {
+            // 顶线垂下的横杆（DOWN 蹲）。
+            gx_box(6, x, 22, 1, 32, 0, COL_GREEN, COL_GREEN, 1);
+            gx_box(7, x - 14, 54, 28, 9, 3, COL_CARD_GREENBG,
+                   COL_GREEN, 1);
+        }
     }
-    char buf[28];
-    snprintf(buf, sizeof(buf), "%d/%d  combo %d", (int) s_g5.cleared,
-             PET_G5_OBSTACLES, (int) s_g5.combo);
-    lv_label_set_text(s_gx_info, buf);
 }
 
 static void gx_render_g6(void)
@@ -2759,31 +3651,40 @@ static void gx_render_g6(void)
         "Hungry!", "Playful!", "Cuddly!",
     };
     static const char *const OPT[3] = { "Food", "Toy", "Hug" };
-    static const int32_t oy[3] = { 92, 122, 152 };
-    gx_ml(0, 4, 42, 188, COL_INK, HINT[s_g6.hint]);
-    for (uint8_t i = 0; i < 3; i += 1) {
-        gx_mk(i, 30, oy[i], 136, 24, COL_PANEL);
-        border(s_gx_mk[i], i == s_gx_sel ? COL_SEL : COL_INK,
-               i == s_gx_sel ? 3 : 1);
-        gx_ml(i + 1, 30, oy[i] + 3, 136, COL_INK, OPT[i]);
-    }
+    static const pet_ui_card_t OPT_ART[3] = {
+        PET_UI_CARD_MEAL, PET_UI_CARD_BALL, PET_UI_CARD_BOND,
+    };
     char buf[16];
     snprintf(buf, sizeof(buf), "Q %d/%d",
              pet_g6_done(&s_g6) ? PET_G6_QUESTIONS : s_g6.question + 1,
              PET_G6_QUESTIONS);
-    lv_label_set_text(s_gx_info, buf);
+    gx_info(buf, false);
+    gx_hint_set("UP/DOWN - OK");
+    // 心情气泡
+    gx_box(0, 8, 18, 176, 20, 8, COL_CARD_WHITE, COL_INK, 1);
+    gx_txt(0, 8, 22, 176, COL_INK, HINT[s_g6.hint]);
+    // 三个选项行（图标 28px 缩到 ~22px）
+    for (uint8_t i = 0; i < 3; i += 1) {
+        int32_t y = 44 + (int32_t) i * 26;
+        bool on = i == s_gx_sel;
+        gx_box(1 + i, 8, y, 176, 24, 9,
+               on ? COL_CARD_PINK : COL_CARD_WHITE,
+               on ? COL_SEL : COL_INK, on ? 2 : 1);
+        gx_img(i, 12, y + 1, pet_ui_card_dsc(OPT_ART[i]));
+        gx_txt(1 + i, 8, y + 6, 176, COL_INK, OPT[i]);
+    }
 }
 
 static void gx_render(void)
 {
     if (s_gx_phase == 0) {
         gx_hide_all();
-        lv_label_set_text(s_gx_info, "GET READY");
-        lv_label_set_text(s_gx_hint, "");
+        gx_ready_chrome();
         return;
     }
     if (s_gx_phase == 2) {
         gx_hide_all();
+        gx_result_chrome();
         return;
     }
     switch (s_gx_id) {
@@ -2798,36 +3699,116 @@ static void gx_render(void)
 
 // ---- 生命周期 -------------------------------------------------------------
 
-static void gx_build_shell(void)
-{
-    lv_obj_clean(s_modal_body);
-    lv_label_set_text(s_modal_title, GAMES_NAME[s_gx_id]);
-    s_gx_info = label(s_modal_body, 4, 6, 188, &lv_font_montserrat_14,
-                      COL_INK, "");
-    s_gx_hint = label(s_modal_body, 4, 214, 188, &lv_font_montserrat_14,
-                      COL_DIM, "");
-    for (uint8_t i = 0; i < 8; i += 1) {
-        s_gx_mk[i] = rect(s_modal_body, 0, 0, 4, 4, 4, COL_PANEL);
-        hide(s_gx_mk[i]);
-    }
-    for (uint8_t i = 0; i < 4; i += 1) {
-        s_gx_ml[i] = label(s_modal_body, 0, 0, 188,
-                           &lv_font_montserrat_14, COL_INK, "");
-        lv_obj_set_style_text_align(s_gx_ml[i], LV_TEXT_ALIGN_CENTER, 0);
-        hide(s_gx_ml[i]);
-    }
-}
-
 static const char *gx_hint_text(void)
 {
     switch (s_gx_id) {
-    case PT_GAME_G2_RHYTHM: return "OK on center";
-    case PT_GAME_G3_CATCH:  return "UP/DOWN move";
-    case PT_GAME_G4_MEMORY: return "UP/DOWN  OK";
-    case PT_GAME_G5_WALK:   return "UP jump DOWN duck";
-    case PT_GAME_G6_PREFER: return "UP/DOWN  OK";
+    case PT_GAME_G2_RHYTHM: return "OK - tap on center";
+    case PT_GAME_G3_CATCH:  return "UP/DOWN - move";
+    case PT_GAME_G4_MEMORY: return "UP/DOWN - OK";
+    case PT_GAME_G5_WALK:   return "UP jump  DOWN duck";
+    case PT_GAME_G6_PREFER: return "UP/DOWN - OK";
     default:                return "";
     }
+}
+
+// READY 中央卡：图标骑卡顶边，1.2s 自动开始（gx_refresh 推进）。
+// 定稿坐标为面板系，body 原点面板 (8,42)，以下均换算为 body 局部坐标。
+static void gx_ready_chrome(void)
+{
+    lv_obj_set_pos(s_gx_card, 20, 2);
+    lv_obj_set_size(s_gx_card, 136, 86);
+    lv_image_set_src(s_gx_card_icon, pet_ui_card_dsc(GAMES_ART[s_gx_id]));
+    lv_obj_set_pos(s_gx_card_icon, 74, -12);
+    lv_obj_set_style_text_font(s_gx_card_l1, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_gx_card_l1, lv_color_hex(COL_INK), 0);
+    lv_obj_set_pos(s_gx_card_l1, 20, 27);
+    lv_label_set_text(s_gx_card_l1, GAMES_NAME[s_gx_id]);
+    lv_obj_set_pos(s_gx_card_l2, 20, 48);
+    lv_label_set_text(s_gx_card_l2, "GET READY");
+    lv_obj_set_pos(s_gx_card_l3, 20, 67);
+    lv_label_set_text(s_gx_card_l3, gx_hint_text());
+    show(s_gx_card);
+    show(s_gx_card_icon);
+    show(s_gx_card_l1);
+    show(s_gx_card_l2);
+    show(s_gx_card_l3);
+    hide(s_gx_pill);
+    hide(s_gx_info);
+    hide(s_gx_hint);
+}
+
+// RESULT 中央卡：评级 + 分数/工资，1.5s 自动退。
+static void gx_result_chrome(void)
+{
+    lv_obj_set_pos(s_gx_card, 20, 0);
+    lv_obj_set_size(s_gx_card, 136, 80);
+    lv_obj_set_style_text_font(s_gx_card_l1, &lv_font_montserrat_20, 0);
+    lv_obj_set_pos(s_gx_card_l1, 20, 14);
+    lv_obj_set_pos(s_gx_card_l2, 20, 43);
+    lv_obj_set_pos(s_gx_card_l3, 20, 60);
+    lv_label_set_text(s_gx_card_l3, "OK");
+    show(s_gx_card);
+    show(s_gx_card_l1);
+    show(s_gx_card_l2);
+    show(s_gx_card_l3);
+    hide(s_gx_card_icon);
+    hide(s_gx_hint);
+}
+
+static void gx_build_shell(void)
+{
+    lv_obj_clean(s_modal_body);
+    frame_pv2(false);
+    lv_label_set_text(s_modal_title, GAMES_TITLE[s_gx_id]);
+
+    // 信息胶囊
+    s_gx_pill = rect(s_modal_body, 80, 0, 32, 16, 8, COL_DOCK_BG);
+    border(s_gx_pill, COL_DOCK_EDGE, 1);
+    hide(s_gx_pill);
+    s_gx_info = label(s_modal_body, 0, 2, 192, &lv_font_montserrat_12,
+                      COL_INK, "");
+    hide(s_gx_info);
+    s_gx_hint = label(s_modal_body, 0, 132, 192, &lv_font_montserrat_12,
+                      COL_HINT, "");
+    hide(s_gx_hint);
+
+    for (uint8_t i = 0; i < GX_MK_N; i += 1) {
+        s_gx_mk[i] = rect(s_modal_body, 0, 0, 4, 4, 4, COL_PANEL);
+        border(s_gx_mk[i], COL_INK, 0);
+        hide(s_gx_mk[i]);
+    }
+    for (uint8_t i = 0; i < 4; i += 1) {
+        s_gx_ml[i] = label(s_modal_body, 0, 0, 192,
+                           &lv_font_montserrat_12, COL_INK, "");
+        hide(s_gx_ml[i]);
+    }
+    // G6 选项图标：28px 位图以左上角为锚缩放到 ~22px。
+    for (uint8_t i = 0; i < GX_IMG_N; i += 1) {
+        s_gx_img[i] = icon_img(s_modal_body, 0, 0,
+                               pet_ui_card_dsc(PET_UI_CARD_MEAL));
+        lv_obj_set_style_transform_pivot_x(s_gx_img[i], 0, 0);
+        lv_obj_set_style_transform_pivot_y(s_gx_img[i], 0, 0);
+        lv_image_set_scale(s_gx_img[i], 205);
+        hide(s_gx_img[i]);
+    }
+
+    // READY / RESULT 共用中央卡（创建坐标为 body 局部；定稿面板坐标 - (8,42)）。
+    s_gx_card = rect(s_modal_body, 20, 2, 136, 86, 14, COL_CARD_WHITE);
+    border(s_gx_card, COL_INK, 1);
+    hide(s_gx_card);
+    s_gx_card_icon = icon_img(s_modal_body, 74, -12,
+                              pet_ui_card_dsc(GAMES_ART[s_gx_id]));
+    hide(s_gx_card_icon);
+    s_gx_card_l1 = label(s_modal_body, 20, 27, 136,
+                         &lv_font_montserrat_14, COL_INK, "");
+    s_gx_card_l2 = label(s_modal_body, 20, 48, 136,
+                         &lv_font_montserrat_12, COL_SEL, "GET READY");
+    lv_obj_set_style_text_letter_space(s_gx_card_l2, 2, 0);
+    s_gx_card_l3 = label(s_modal_body, 20, 67, 136,
+                         &lv_font_montserrat_12, COL_SUB, "");
+    hide(s_gx_card_l1);
+    hide(s_gx_card_l2);
+    hide(s_gx_card_l3);
 }
 
 static void gx_open(uint8_t id)
@@ -2886,8 +3867,6 @@ static void gx_finish(void)
     s_gx_t0 = now_ms();
     s_mood = MOOD_HAPPY;
     s_mood_until = now_ms() + 900;
-    gx_hide_all();
-    gx_ml(0, 4, 70, 188, COL_GREEN, gx_grade_word(grade));
     char buf[24];
     if (s_gx_job) {
         snprintf(buf, sizeof(buf), "+%u G wage",
@@ -2895,8 +3874,13 @@ static void gx_finish(void)
     } else {
         snprintf(buf, sizeof(buf), "Score %d", (int) score);
     }
-    gx_ml(1, 4, 110, 188, COL_INK, buf);
-    lv_label_set_text(s_gx_hint, "OK");
+    gx_hide_all();
+    lv_obj_set_style_text_color(s_gx_card_l1,
+                                lv_color_hex(grade == PT_GAME_GRADE_GOOD
+                                             ? COL_INK : COL_GREEN), 0);
+    lv_label_set_text(s_gx_card_l1, gx_grade_word(grade));
+    lv_label_set_text(s_gx_card_l2, buf);
+    gx_result_chrome();
     pet_audio_play(grade == PT_GAME_GRADE_GOOD ? SND_CONFIRM : SND_HAPPY);
 }
 
@@ -2920,7 +3904,6 @@ static void gx_refresh(int64_t now)
         if (now - s_gx_t0 >= 1200) {
             s_gx_phase = 1;
             s_gx_next_ms = now;
-            lv_label_set_text(s_gx_hint, gx_hint_text());
             gx_render();
         }
         return;
@@ -2996,7 +3979,6 @@ static void gx_click(pet_btn_t btn)
         s_gx_phase = 1;                       // 跳过 READY
         s_gx_t0 = now_ms();
         s_gx_next_ms = now_ms();
-        lv_label_set_text(s_gx_hint, gx_hint_text());
         gx_render();
         return;
     }
@@ -3420,6 +4402,16 @@ static void toggle_lights(void)
     pet_audio_play(SND_CONFIRM);
 }
 
+// PV2 batch2：打开 STATUS，焦点落在当前页（首页 INFO）段。
+static void status_open(void)
+{
+    s_status_page = 0;
+    s_status_focus = 1;
+    s_mode = MODE_STATUS;
+    modal_open();
+    status_build();
+}
+
 static void activate_icon(pet_icon_t icon)
 {
     switch (icon) {
@@ -3428,7 +4420,7 @@ static void activate_icon(pet_icon_t icon)
         s_list_sel = 0;
         s_mode = MODE_LIST;
         modal_open();
-        list_build();
+        food_build();
         pet_audio_play(SND_CONFIRM);
         break;
     case PET_ICON_CLEAN:
@@ -3442,10 +4434,7 @@ static void activate_icon(pet_icon_t icon)
         }
         break;
     case PET_ICON_STATUS:
-        s_status_page = 0;
-        s_mode = MODE_STATUS;
-        modal_open();
-        status_build();
+        status_open();
         pet_audio_play(SND_CONFIRM);
         break;
     case PET_ICON_LIGHTS:
@@ -3484,10 +4473,11 @@ static void activate_icon(pet_icon_t icon)
         break;
     case PET_ICON_SETTINGS:
         s_list_kind = LIST_SETTINGS;
+        s_sound_page = 0;
         s_list_sel = pet_app_volume();
         s_mode = MODE_LIST;
         modal_open();
-        list_build();
+        sound_build();
         pet_audio_play(SND_CONFIRM);
         break;
     default:
@@ -3511,10 +4501,7 @@ static uint8_t s_prev_volume = 2;
 
 static void open_status_summary(void)
 {
-    s_status_page = 0;
-    s_mode = MODE_STATUS;
-    modal_open();
-    status_build();
+    status_open();
 }
 
 static void toggle_mute_chord(void)
@@ -3567,10 +4554,7 @@ static void handle_room(pet_ui_action_t act)
         toggle_lights();
         break;
     case PET_UI_ACT_MENU:
-        s_status_page = 0;
-        s_mode = MODE_STATUS;
-        modal_open();
-        status_build();
+        status_open();
         break;
     default:
         break;
@@ -3579,14 +4563,15 @@ static void handle_room(pet_ui_action_t act)
 
 static void handle_list_key(pet_ui_action_t act)
 {
-    if (act == PET_UI_ACT_PREV) {
-        s_list_sel = (s_list_sel + s_list_count - 1) % s_list_count;
-        list_build();
-    } else if (act == PET_UI_ACT_NEXT) {
-        s_list_sel = (s_list_sel + 1) % s_list_count;
-        list_build();
-    } else if (act == PET_UI_ACT_CONFIRM) {
-        if (s_list_kind == LIST_FOOD) {
+    if (s_list_kind == LIST_FOOD) {
+        // PV2 卡片焦点：UP/DOWN 只改样式不重建。
+        if (act == PET_UI_ACT_PREV) {
+            s_list_sel = (s_list_sel + s_focus_n - 1) % s_focus_n;
+            pv2_mark((uint8_t) s_list_sel, false);
+        } else if (act == PET_UI_ACT_NEXT) {
+            s_list_sel = (s_list_sel + 1) % s_focus_n;
+            pv2_mark((uint8_t) s_list_sel, false);
+        } else if (act == PET_UI_ACT_CONFIRM) {
             pt_intent_kind_t intent;
             if (s_snap.stage == PT_STAGE_BABY) {
                 intent = PT_INTENT_FEED_BOTTLE;
@@ -3601,15 +4586,46 @@ static void handle_list_key(pet_ui_action_t act)
             s_mood_until = now_ms() + 800;
             bounce(s_creature, CREATURE_Y, -10, 220);
             modal_close();
-        } else {
-            if (s_list_sel < 4) {
-                pet_app_set_volume((uint8_t) s_list_sel);
+        } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+            pet_audio_play(SND_CANCEL);
+            modal_close();
+        }
+        return;
+    }
+
+    // PV2 batch2：SOUND 卡片弹层（音量四档页 + 免打扰两档页）。
+    uint8_t slots = s_focus_n;
+    if (act == PET_UI_ACT_PREV) {
+        s_list_sel = (s_list_sel + slots - 1) % slots;
+        pv2_mark((uint8_t) s_list_sel, true);
+    } else if (act == PET_UI_ACT_NEXT) {
+        s_list_sel = (s_list_sel + 1) % slots;
+        pv2_mark((uint8_t) s_list_sel, true);
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        uint8_t kind = s_focus_kind[s_list_sel];
+        uint8_t param = s_focus_param[s_list_sel];
+        if (kind == PV2_F_CARD) {
+            if (s_sound_page == 0) {
+                pet_app_set_volume(param);
             } else {
-                pet_app_set_quiet(s_list_sel == 4);
+                pet_app_set_quiet(param == 0);
             }
             pet_audio_play(SND_CONFIRM);
-            set_msg("Saved", 800);
-            modal_close();
+            sound_build();      // 绿勾移到新当前值
+        } else if (kind == PV2_F_PREV) {
+            if (s_sound_page > 0) {
+                s_sound_page -= 1;
+                s_list_sel = 0;
+                sound_build();
+                pet_audio_play(SND_CONFIRM);
+            }
+        } else if (kind == PV2_F_NEXT) {
+            if (s_sound_page + 1 < 2) {
+                s_sound_page += 1;
+                s_list_sel = 0;
+                sound_build();
+                pet_audio_play(SND_CONFIRM);
+            }
         }
     } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
         pet_audio_play(SND_CANCEL);
@@ -3617,14 +4633,37 @@ static void handle_list_key(pet_ui_action_t act)
     }
 }
 
+static void status_goto(int page)
+{
+    s_status_page = page;
+    s_status_focus = page + 1;
+    status_build();
+    pet_audio_play(SND_CONFIRM);
+}
+
 static void handle_status_key(pet_ui_action_t act)
 {
     if (act == PET_UI_ACT_PREV) {
-        s_status_page = (s_status_page + 2) % 3;
-        status_build();
-    } else if (act == PET_UI_ACT_NEXT || act == PET_UI_ACT_CONFIRM) {
-        s_status_page = (s_status_page + 1) % 3;
-        status_build();
+        s_status_focus = (s_status_focus + 4) % 5;
+        status_footer_refresh();
+    } else if (act == PET_UI_ACT_NEXT) {
+        s_status_focus = (s_status_focus + 1) % 5;
+        status_footer_refresh();
+    } else if (act == PET_UI_ACT_CONFIRM) {
+        if (s_status_focus == 0) {
+            if (s_status_page > 0) {
+                status_goto(s_status_page - 1);
+            }
+        } else if (s_status_focus == 4) {
+            if (s_status_page < 2) {
+                status_goto(s_status_page + 1);
+            }
+        } else {
+            int page = s_status_focus - 1;
+            if (page != s_status_page) {
+                status_goto(page);
+            }
+        }
     } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
         modal_close();
     }
@@ -3672,6 +4711,7 @@ static void handle_key_locked(pet_btn_t btn, pet_ev_t ev)
             } else {
                 s_gx_exit_armed_until = now_ms() + 2000;
                 lv_label_set_text(s_gx_hint, "Hold OK again to exit");
+                show(s_gx_hint);
             }
             return;
         }
@@ -4166,12 +5206,16 @@ static void refresh(lv_timer_t *timer)
     if (s_mode == MODE_GAME && s_g_exit_armed_until != 0
         && t >= s_g_exit_armed_until) {
         s_g_exit_armed_until = 0;
-        lv_label_set_text(s_game_hint, "UP/DOWN choose  OK deal");
+        if (s_g_phase == PHASE_CHOOSE) {
+            lv_label_set_text(s_game_hint, "UP/DOWN choose  OK deal");
+        }
     }
     if (s_mode == MODE_GX) {
         if (s_gx_exit_armed_until != 0 && t >= s_gx_exit_armed_until) {
             s_gx_exit_armed_until = 0;
-            lv_label_set_text(s_gx_hint, gx_hint_text());
+            if (s_gx_phase == 1) {
+                lv_label_set_text(s_gx_hint, gx_hint_text());
+            }
         }
         gx_refresh(t);
     }
@@ -4359,7 +5403,24 @@ void pet_ui_init(void)
     lv_obj_set_style_pad_all(s_modal, 0, 0);
     lv_obj_t *panel = rect(s_modal, 16, 40, 208, 240, 16, COL_PANEL);
     border(panel, COL_DIM, 2);
-    s_modal_title = label(panel, 0, 10, 208, &lv_font_montserrat_20, COL_INK, "");
+    // PV2：14px 加粗左对齐标题（20 留给孵化/进化英雄时刻）。
+    s_modal_title = label(panel, 14, 13, 104, &lv_font_montserrat_14,
+                          COL_INK, "");
+    lv_obj_set_style_text_align(s_modal_title, LV_TEXT_ALIGN_LEFT, 0);
+    s_mhair = rect(panel, 0, 36, 208, 1, 0, COL_HAIR);
+    // 金币胶囊（SHOP/BAG）。
+    s_mcoin = rect(panel, 150, 12, 40, 17, 9, COL_COIN_BG);
+    border(s_mcoin, COL_INK, 1);
+    s_mcoin_lbl = label(s_mcoin, 11, 2, 27, &lv_font_montserrat_12,
+                        COL_INK, "");
+    // 页码 < 1/2 >（标题右侧）。
+    s_mp_prev = label(panel, 56, 15, 12, &lv_font_montserrat_12, COL_INK,
+                       "<");
+    s_mp_cur = label(panel, 66, 15, 26, &lv_font_montserrat_12, COL_INK,
+                      "1/1");
+    s_mp_next = label(panel, 90, 15, 12, &lv_font_montserrat_12, COL_INK,
+                       ">");
+
     s_modal_body = lv_obj_create(panel);
     lv_obj_remove_flag(s_modal_body, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(s_modal_body, 8, 44);
@@ -4367,6 +5428,73 @@ void pet_ui_init(void)
     lv_obj_set_style_bg_opa(s_modal_body, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_modal_body, 0, 0);
     lv_obj_set_style_pad_all(s_modal_body, 0, 0);
+
+    // 页脚操作条：‹ / SHOP / BAG / ›（PV2 卡片弹层）。
+    s_mfooter = lv_obj_create(panel);
+    lv_obj_remove_flag(s_mfooter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_mfooter, 0, 200);
+    lv_obj_set_size(s_mfooter, 208, 22);
+    lv_obj_set_style_bg_opa(s_mfooter, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_mfooter, 0, 0);
+    lv_obj_set_style_pad_all(s_mfooter, 0, 0);
+    s_ft_prev = rect(s_mfooter, 14, 0, 20, 20, 8, COL_DOCK_BG);
+    border(s_ft_prev, COL_INK, 1);
+    label(s_ft_prev, 0, 3, 20, &lv_font_montserrat_12, COL_INK, "<");
+    s_ft_shop = rect(s_mfooter, 28, 0, 76, 20, 9, COL_TAB_ON);
+    border(s_ft_shop, COL_INK, 1);
+    label(s_ft_shop, 0, 3, 76, &lv_font_montserrat_12, COL_INK, "SHOP");
+    s_ft_bag = rect(s_mfooter, 104, 0, 76, 20, 9, COL_DOCK_BG);
+    border(s_ft_bag, COL_INK, 1);
+    label(s_ft_bag, 0, 3, 76, &lv_font_montserrat_12, COL_INK, "BAG");
+    s_ft_next = rect(s_mfooter, 174, 0, 20, 20, 8, COL_DOCK_BG);
+    border(s_ft_next, COL_INK, 1);
+    label(s_ft_next, 0, 3, 20, &lv_font_montserrat_12, COL_INK, ">");
+
+    // PV2 batch2 STATUS 页脚：‹ INFO VITALS CARE ›（与 s_mfooter 同高、互斥显示）。
+    s_sfooter = lv_obj_create(panel);
+    lv_obj_remove_flag(s_sfooter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_sfooter, 0, 200);
+    lv_obj_set_size(s_sfooter, 208, 22);
+    lv_obj_set_style_bg_opa(s_sfooter, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_sfooter, 0, 0);
+    lv_obj_set_style_pad_all(s_sfooter, 0, 0);
+    s_sf_prev = rect(s_sfooter, 10, 0, 20, 20, 8, COL_DOCK_BG);
+    border(s_sf_prev, COL_INK, 1);
+    label(s_sf_prev, 0, 3, 20, &lv_font_montserrat_12, COL_INK, "<");
+    static const char *const SF_TAB_NAME[3] = { "INFO", "VITALS", "CARE" };
+    static const int32_t SF_TAB_X[3] = { 34, 81, 128 };
+    for (int i = 0; i < 3; i += 1) {
+        s_sf_tab[i] = rect(s_sfooter, SF_TAB_X[i], 0, 46, 20, 9, COL_DOCK_BG);
+        border(s_sf_tab[i], COL_INK, 1);
+        label(s_sf_tab[i], 0, 3, 46, &lv_font_montserrat_12, COL_INK,
+              SF_TAB_NAME[i]);
+    }
+    s_sf_next = rect(s_sfooter, 178, 0, 20, 20, 8, COL_DOCK_BG);
+    border(s_sf_next, COL_INK, 1);
+    label(s_sf_next, 0, 3, 20, &lv_font_montserrat_12, COL_INK, ">");
+    hide(s_sfooter);
+
+    s_mback = label(panel, 0, 223, 208, &lv_font_montserrat_12, COL_HINT,
+                    "hold OK - back");
+
+    // 面板内顶部 toast：拒绝/反馈胶囊，覆盖在卡片之上。
+    s_toast_box = rect(panel, 20, 48, 168, 22, 11, COL_PANEL);
+    border(s_toast_box, COL_RED, 1);
+    lv_obj_t *alert = rect(s_toast_box, 8, 6, 10, 10, 5, COL_RED);
+    (void) alert;
+    label(s_toast_box, 8, 3, 10, &lv_font_montserrat_12, COL_PANEL, "!");
+    s_toast_msg = label(s_toast_box, 22, 3, 142, &lv_font_montserrat_12,
+                        COL_RED, "");
+    hide(s_toast_box);
+
+    // 初始全部 chrome 隐藏，由各 builder 按范式点亮。
+    hide(s_mhair);
+    hide(s_mcoin);
+    hide(s_mp_prev);
+    hide(s_mp_cur);
+    hide(s_mp_next);
+    hide(s_mfooter);
+    hide(s_mback);
     hide(s_modal);
 
     // 孵化/进化白光演出
