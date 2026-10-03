@@ -183,7 +183,12 @@ static lv_obj_t *s_game_hint;
 
 // 全屏演出与纪念
 static lv_obj_t *s_eff_cont;
-static lv_obj_t *s_eff_txt;
+static lv_obj_t *s_eff_ring_out;   // 悬念期呼吸双环（金/粉）
+static lv_obj_t *s_eff_ring_in;
+static lv_obj_t *s_eff_glyph;      // Montserrat20：孵化 ! / 进化 ?
+static lv_obj_t *s_eff_word;       // HATCHING / EVOLVING
+static lv_obj_t *s_eff_burst;      // 揭晓扩散粉环
+static lv_obj_t *s_eff_spark[4];   // 揭晓飞散星点（金/粉）
 static lv_obj_t *s_memorial;
 static lv_obj_t *s_memorial_name;
 static lv_obj_t *s_memorial_line;
@@ -4697,6 +4702,107 @@ static void handle_agency_key(pet_ui_action_t act)
 // 全屏演出与死亡纪念
 // ---------------------------------------------------------------------------
 
+// PV2 batch9 全屏演出几何（屏坐标，定稿 pv2-overlay.html）。
+#define EFF_CX          120
+#define EFF_RING_CY     112   // 悬念双环中心
+#define EFF_BURST_CY    114   // 爆开中心（对齐宠体视觉中心）
+#define EFF_RING_OUT_R  44
+#define EFF_RING_IN_R   26
+#define EFF_BURST_R0    26
+#define EFF_BURST_R1    48
+
+static void eff_border_opa_cb(lv_obj_t *o, int32_t v)
+{
+    lv_obj_set_style_border_opa(o, (lv_opa_t) v, 0);
+}
+
+static void eff_bg_opa_cb(lv_obj_t *o, int32_t v)
+{
+    lv_obj_set_style_bg_opa(o, (lv_opa_t) v, 0);
+}
+
+// 呼吸：描边不透明度在 lo/hi 间无限往返。
+static void eff_breathe(lv_obj_t *o, int32_t lo, int32_t hi, uint32_t ms)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, o);
+    lv_anim_set_values(&a, lo, hi);
+    lv_anim_set_duration(&a, ms);
+    lv_anim_set_playback_duration(&a, ms);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t) eff_border_opa_cb);
+    lv_anim_start(&a);
+}
+
+// 爆环：v 0..256，半径 26->48 扩散，不透明度 200->0。
+static void eff_burst_cb(lv_obj_t *o, int32_t v)
+{
+    int32_t r = EFF_BURST_R0
+              + (EFF_BURST_R1 - EFF_BURST_R0) * v / 256;
+    lv_obj_set_size(o, r * 2, r * 2);
+    lv_obj_set_pos(o, EFF_CX - r, EFF_BURST_CY - r);
+    lv_obj_set_style_radius(o, r, 0);
+    lv_obj_set_style_border_opa(o,
+        (lv_opa_t) (200 * (256 - v) / 256), 0);
+}
+
+static void eff_burst_play(void)
+{
+    static const int16_t sp_x[4] = { 78, 156, 82, 152 };
+    static const int16_t sp_y[4] = { 76, 76, 150, 150 };
+
+    lv_obj_set_size(s_eff_burst, EFF_BURST_R0 * 2, EFF_BURST_R0 * 2);
+    lv_obj_set_pos(s_eff_burst, EFF_CX - EFF_BURST_R0,
+                   EFF_BURST_CY - EFF_BURST_R0);
+    lv_obj_set_style_radius(s_eff_burst, EFF_BURST_R0, 0);
+    lv_obj_set_style_border_opa(s_eff_burst, (lv_opa_t) 200, 0);
+    show(s_eff_burst);
+
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_eff_burst);
+    lv_anim_set_values(&a, 0, 256);
+    lv_anim_set_duration(&a, 500);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t) eff_burst_cb);
+    lv_anim_start(&a);
+
+    for (int i = 0; i < 4; i += 1) {
+        lv_obj_t *sp = s_eff_spark[i];
+        lv_obj_set_pos(sp, 117, 111);   // 6x6 居中起
+        lv_obj_set_style_bg_opa(sp, LV_OPA_COVER, 0);
+        show(sp);
+
+        lv_anim_t ax;
+        lv_anim_init(&ax);
+        lv_anim_set_var(&ax, sp);
+        lv_anim_set_duration(&ax, 500);
+        lv_anim_set_path_cb(&ax, lv_anim_path_ease_out);
+        lv_anim_set_exec_cb(&ax, (lv_anim_exec_xcb_t) lv_obj_set_x);
+        lv_anim_set_values(&ax, 117, sp_x[i]);
+        lv_anim_start(&ax);
+
+        lv_anim_t ay;
+        lv_anim_init(&ay);
+        lv_anim_set_var(&ay, sp);
+        lv_anim_set_duration(&ay, 500);
+        lv_anim_set_path_cb(&ay, lv_anim_path_ease_out);
+        lv_anim_set_exec_cb(&ay, (lv_anim_exec_xcb_t) lv_obj_set_y);
+        lv_anim_set_values(&ay, 111, sp_y[i]);
+        lv_anim_start(&ay);
+
+        lv_anim_t ao;
+        lv_anim_init(&ao);
+        lv_anim_set_var(&ao, sp);
+        lv_anim_set_values(&ao, LV_OPA_COVER, LV_OPA_TRANSP);
+        lv_anim_set_duration(&ao, 500);
+        lv_anim_set_path_cb(&ao, lv_anim_path_ease_out);
+        lv_anim_set_exec_cb(&ao, (lv_anim_exec_xcb_t) eff_bg_opa_cb);
+        lv_anim_start(&ao);
+    }
+}
+
 static void eff_start(int kind)
 {
     s_eff_kind = kind;
@@ -4707,14 +4813,35 @@ static void eff_start(int kind)
     lv_anim_delete(s_creature, NULL);
     // 孵化/进化可能在喂食等弹层开着时发生：弹层让位，避免演出结束后残留。
     hide(s_modal);
+
+    // 复位上轮揭晓件。
+    lv_anim_delete(s_eff_burst, NULL);
+    hide(s_eff_burst);
+    for (int i = 0; i < 4; i += 1) {
+        lv_anim_delete(s_eff_spark[i], NULL);
+        hide(s_eff_spark[i]);
+    }
+
+    // 悬念件：粉 !/HATCHING 或金 ?/EVOLVING，双环呼吸重启。
+    bool hatch = kind == EFF_HATCH;
+    lv_label_set_text(s_eff_glyph, hatch ? "!" : "?");
+    lv_obj_set_style_text_color(s_eff_glyph,
+        lv_color_hex(hatch ? COL_SEL : COL_YELLOW), 0);
+    lv_label_set_text(s_eff_word, hatch ? "HATCHING" : "EVOLVING");
+    lv_anim_delete(s_eff_ring_out, NULL);
+    lv_anim_delete(s_eff_ring_in, NULL);
+    lv_obj_set_style_border_opa(s_eff_ring_out, (lv_opa_t) 76, 0);
+    lv_obj_set_style_border_opa(s_eff_ring_in, (lv_opa_t) 204, 0);
+    show(s_eff_ring_out);
+    show(s_eff_ring_in);
+    show(s_eff_glyph);
+    show(s_eff_word);
+    eff_breathe(s_eff_ring_out, 76, 204, 700);
+    eff_breathe(s_eff_ring_in, 204, 128, 700);
+
     show(s_eff_cont);
     lv_obj_move_foreground(s_eff_cont);
     lv_obj_set_style_bg_opa(s_eff_cont, LV_OPA_COVER, 0);
-    if (kind == EFF_HATCH) {
-        lv_label_set_text(s_eff_txt, "!");
-    } else {
-        lv_label_set_text(s_eff_txt, "?");
-    }
 }
 
 static void memorial_open(void)
@@ -5122,8 +5249,8 @@ static void handle_key_locked(pet_btn_t btn, pet_ev_t ev)
         }
         return;
     }
-    if (s_mode == MODE_OVERLAY) {
-        return;   // 进化/孵化演出锁输入
+    if (s_mode == MODE_OVERLAY || s_eff_kind != EFF_NONE) {
+        return;   // 进化/孵化演出全程锁输入（揭晓后房间已刷新但 FX 未散）
     }
     if (s_mode == MODE_GAME) {
         if (ev == PET_EV_LONG && btn == PET_BTN_OK) {
@@ -5355,12 +5482,22 @@ static void update_effect(void)
 
     if (!s_eff_rebuilt && elapsed >= reveal) {
         s_eff_rebuilt = true;
+        // 揭晓即回到房间模式：本帧后续 refresh 会重建宠体/坞栏/顶栏并画胶囊，
+        // 与爆开动画同框（旧白屏时代靠全屏遮挡，这些控件在 finish 前都是旧值）。
+        s_mode = MODE_ROOM;
         build_creature();
         dock_build_widgets();
         dock_refresh_selected();
         bounce(s_creature, CREATURE_Y, -14, 320);
         lv_obj_set_style_bg_opa(s_eff_cont, LV_OPA_TRANSP, 0);
-        lv_label_set_text(s_eff_txt, "");
+        // 悬念件退场，零位图爆开件上场。
+        lv_anim_delete(s_eff_ring_out, NULL);
+        lv_anim_delete(s_eff_ring_in, NULL);
+        hide(s_eff_ring_out);
+        hide(s_eff_ring_in);
+        hide(s_eff_glyph);
+        hide(s_eff_word);
+        eff_burst_play();
         if (s_eff_kind == EFF_EVOLVE) {
             set_msg(species_name(s_snap.species), 1800);
         } else {
@@ -5490,8 +5627,10 @@ static void refresh(lv_timer_t *timer)
             s_battery_cache < 20 ? lv_color_hex(COL_RED) : lv_color_hex(COL_INK), 0);
     }
 
-    if (s_mode == MODE_OVERLAY) {
+    if (s_eff_kind != EFF_NONE) {
         update_effect();
+    }
+    if (s_mode == MODE_OVERLAY) {
         return;
     }
     if (s_mode == MODE_MEMORIAL) {
@@ -5505,7 +5644,9 @@ static void refresh(lv_timer_t *timer)
     }
 
     // 每日首次开机签到：进入幼儿期后每天自动弹一次；错过可在商店首页补领。
+    // 演出揭晓后的残余 FX 窗口内不抢弹（s_eff_kind 尚未清）。
     if (!s_checkin_prompted && s_mode == MODE_ROOM
+        && s_eff_kind == EFF_NONE
         && s_snap.stage >= PT_STAGE_CHILD
         && pt_econ_can_checkin(&s_esnap, s_snap.day_id)) {
         s_checkin_prompted = true;
@@ -6020,18 +6161,48 @@ void pet_ui_init(void)
     hide(s_mback);
     hide(s_modal);
 
-    // 孵化/进化白光演出
+    // 孵化/进化全屏演出（PV2 batch9：奶白接管 + 呼吸双环 + 爆开，零位图）。
     s_eff_cont = lv_obj_create(s_scr);
     lv_obj_remove_flag(s_eff_cont, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(s_eff_cont, 0, 0);
     lv_obj_set_size(s_eff_cont, LCD_W, LCD_H);
     lv_obj_set_style_radius(s_eff_cont, 0, 0);
-    lv_obj_set_style_bg_color(s_eff_cont, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(s_eff_cont, lv_color_hex(COL_BG), 0);
     lv_obj_set_style_bg_opa(s_eff_cont, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_eff_cont, 0, 0);
     lv_obj_set_style_pad_all(s_eff_cont, 0, 0);
-    s_eff_txt = label(s_eff_cont, 0, 140, LCD_W, &lv_font_montserrat_20,
-                      COL_INK, "?");
+    s_eff_ring_out = rect(s_eff_cont, EFF_CX - EFF_RING_OUT_R,
+                          EFF_RING_CY - EFF_RING_OUT_R,
+                          EFF_RING_OUT_R * 2, EFF_RING_OUT_R * 2,
+                          EFF_RING_OUT_R, COL_BG);
+    lv_obj_set_style_bg_opa(s_eff_ring_out, LV_OPA_TRANSP, 0);
+    border(s_eff_ring_out, COL_YELLOW, 2);
+    s_eff_ring_in = rect(s_eff_cont, EFF_CX - EFF_RING_IN_R,
+                         EFF_RING_CY - EFF_RING_IN_R,
+                         EFF_RING_IN_R * 2, EFF_RING_IN_R * 2,
+                         EFF_RING_IN_R, COL_BG);
+    lv_obj_set_style_bg_opa(s_eff_ring_in, LV_OPA_TRANSP, 0);
+    border(s_eff_ring_in, COL_SEL, 2);
+    s_eff_glyph = label(s_eff_cont, 0, 100, LCD_W,
+                        &lv_font_montserrat_20, COL_SEL, "!");
+    s_eff_word = label(s_eff_cont, 0, 158, LCD_W,
+                       &lv_font_montserrat_12, COL_SUB, "HATCHING");
+    lv_obj_set_style_text_letter_space(s_eff_word, 2, 0);
+    s_eff_burst = rect(s_eff_cont, EFF_CX - EFF_BURST_R0,
+                       EFF_BURST_CY - EFF_BURST_R0,
+                       EFF_BURST_R0 * 2, EFF_BURST_R0 * 2,
+                       EFF_BURST_R0, COL_BG);
+    lv_obj_set_style_bg_opa(s_eff_burst, LV_OPA_TRANSP, 0);
+    border(s_eff_burst, COL_SEL, 2);
+    hide(s_eff_burst);
+    static const uint32_t s_eff_spark_col[4] = {
+        COL_YELLOW, COL_SEL, COL_SEL, COL_YELLOW
+    };
+    for (int i = 0; i < 4; i += 1) {
+        s_eff_spark[i] = rect(s_eff_cont, 117, 111, 6, 6, 3,
+                              s_eff_spark_col[i]);
+        hide(s_eff_spark[i]);
+    }
     hide(s_eff_cont);
 
     // 死亡纪念（PV2 batch8：全屏深紫 + 居中纪念卡，零位图提灯标记）。
