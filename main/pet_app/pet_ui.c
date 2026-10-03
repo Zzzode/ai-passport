@@ -172,7 +172,6 @@ static lv_obj_t *s_caption_txt;
 static lv_obj_t *s_modal;
 static lv_obj_t *s_modal_title;
 static lv_obj_t *s_modal_body;
-static lv_obj_t *s_list_row[6];
 static lv_obj_t *s_game_box;      // G1 中央卡（赢时变绿）
 static lv_obj_t *s_game_card;
 static lv_obj_t *s_game_sub;      // 结果副行 "7 -> 9"
@@ -317,21 +316,31 @@ static lv_obj_t *s_dfooter;
 static lv_obj_t *s_df_prev;
 static lv_obj_t *s_df_tab[3];
 static lv_obj_t *s_df_next;
+// PV2 batch5 FAMILY 专用页脚：BACK/TREE、仅 BACK、‹ BACK › 三态。
+static lv_obj_t *s_mffooter;
+static lv_obj_t *s_mf_back;
+static lv_obj_t *s_mf_tree;
+static lv_obj_t *s_mf_prev;
+static lv_obj_t *s_mf_mid;
+static lv_obj_t *s_mf_next;
+// PV2 batch6：签到 CLAIM 单丸；STYLE 三档页脚 WEAR/ROOM/THEME + 贝壳 chip。
+static lv_obj_t *s_cclaim;
+static lv_obj_t *s_tfooter;
+static lv_obj_t *s_tf_tab[3];
+static lv_obj_t *s_tshell;
+static lv_obj_t *s_tshell_lbl;
 static lv_obj_t *s_mback;
 static lv_obj_t *s_toast_box;
 static lv_obj_t *s_toast_msg;
 static lv_timer_t *s_toast_timer;
 
-// 换装/家具/主题（S4）
+// 换装/家具/主题（S4，PV2 batch6）
 static pt_decor_t s_dsnap;
 static pt_decor_t s_dprev;
 static bool s_have_dprev;
 static uint8_t s_dec_tab;        // 0=Wear 1=Room 2=Theme
-static uint8_t s_dec_page;
-static uint8_t s_dec_sel;
-static uint8_t s_dec_rows;
-static uint16_t s_dec_row_id[6];
-static uint8_t s_dec_row_kind[6];   // 0=条目 1=More 2=Tab 切换
+static uint8_t s_dec_sel;        // 0..n-1=行；n..n+2=页脚三档
+static lv_obj_t *s_t_row[6];     // 当前档列表行（最多 6）
 static bool s_dec_dirty;
 static int s_battery_cache = -2;
 static int s_battery_div;
@@ -868,6 +877,11 @@ static void frame_legacy(void)
     hide(s_mfooter);
     hide(s_sfooter);
     hide(s_dfooter);
+    hide(s_mffooter);
+    hide(s_tfooter);
+    hide(s_cclaim);
+    hide(s_tshell);
+    hide(s_mcoin);
     hide(s_mback);
     hide(s_toast_box);
     if (s_toast_timer != NULL) {
@@ -882,6 +896,7 @@ static void frame_pv2(bool with_footer)
     lv_obj_set_size(s_modal_body, 192, 156);
     show(s_mhair);
     show(s_mback);
+    lv_label_set_text(s_mback, "hold OK - back");
     if (with_footer) {
         show(s_mfooter);
     } else {
@@ -889,6 +904,10 @@ static void frame_pv2(bool with_footer)
     }
     hide(s_sfooter);
     hide(s_dfooter);
+    hide(s_mffooter);
+    hide(s_tfooter);
+    hide(s_cclaim);
+    hide(s_tshell);
     hide(s_mcoin);
     // SOUND 会把页码挪到页眉居中；回到其它弹层时复位。
     lv_obj_set_pos(s_mp_cur, 66, 15);
@@ -1545,7 +1564,8 @@ static void shop_seq_build(const uint16_t *items, uint8_t total, bool bonus)
             s_seq_id[s_seq_n] = PT_ITEM_NONE;
             s_seq_n += 1;
         }
-        if (s_snap.stage >= PT_STAGE_TEEN) {
+        // PV2 batch6：幼儿期即可进入看锁定行（穿戴/家具均 TEEN 解锁）。
+        if (s_snap.stage >= PT_STAGE_CHILD) {
             s_seq_kind[s_seq_n] = SEQ_STYLE;
             s_seq_id[s_seq_n] = PT_ITEM_NONE;
             s_seq_n += 1;
@@ -1856,36 +1876,18 @@ static void handle_shop_key(pet_ui_action_t act)
 }
 
 // ---------------------------------------------------------------------------
-// Style 弹层：服装 / 功能家具 / 房间主题（S4，designs 05 §7）
+// Style 弹层：服装 / 功能家具 / 房间主题（PV2 batch6，定稿 pv2-style.html）
+// 单环：当前档全部列表行 -> WEAR -> ROOM -> THEME；长按 OK 回 SHOP，双击回房间。
 // ---------------------------------------------------------------------------
-
-enum {
-    DEC_ROW_ITEM = 0,
-    DEC_ROW_MORE,
-    DEC_ROW_TAB,
-};
-
-static const char *const DEC_TAB_NAME[3] = { "Wear", "Room", "Theme" };
 
 static const char *outfit_slot_tag(pt_slot_t slot)
 {
     switch (slot) {
-    case PT_SLOT_HAT: return "Hat ";
+    case PT_SLOT_HAT: return "Hat";
     case PT_SLOT_FACE: return "Face";
     case PT_SLOT_COLLAR: return "Neck";
     case PT_SLOT_HELD: return "Hand";
     default: return "?";
-    }
-}
-
-static void style_mark_rows(void)
-{
-    for (uint8_t i = 0; i < s_dec_rows; i += 1) {
-        if (i == s_dec_sel) {
-            border(s_list_row[i], COL_SEL, 3);
-        } else {
-            lv_obj_set_style_border_width(s_list_row[i], 0, 0);
-        }
     }
 }
 
@@ -1900,128 +1902,154 @@ static uint8_t style_tab_count(void)
     return (uint8_t) PT_THEME_COUNT;
 }
 
-// 三个页签统一分页：每行 28px，底部 1 行页签；超出用 More，最多 6 行。
+// 页眉双钱包：贝壳 chip（蓝）+ 金币 chip（复用 chrome_coins）。
+static void style_chrome(void)
+{
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%uS", (unsigned) s_esnap.shells);
+    lv_label_set_text(s_tshell_lbl, buf);
+    chrome_coins(s_esnap.coins);
+}
+
+// 右缘价格小丸（行内坐标，右缘对齐 x=184）：G=黄底棕字，S=蓝底蓝字。
+static void style_price(lv_obj_t *row, const char *txt, bool shells)
+{
+    int32_t tw = text_w12(txt);
+    int32_t pw = tw + 12;
+    if (pw < 30) {
+        pw = 30;
+    }
+    lv_obj_t *p = rect(row, 184 - pw, 3, pw, 16, 8,
+                       shells ? COL_PILL_BLUE : COL_COIN_BG);
+    border(p, shells ? COL_BLUE : COL_YELLOW, 1);
+    label(p, 0, 2, pw, &lv_font_montserrat_12,
+          shells ? COL_BLUE : COL_BROWN, txt);
+}
+
+static void style_row_wear(lv_obj_t *r, uint8_t id)
+{
+    pt_outfit_t oid = (pt_outfit_t) (id + 1);
+    const pt_outfit_def_t *od = pt_outfit_def(oid);
+    bool locked = s_snap.stage < od->min_stage;
+    llabel(r, 10, 4, 28, &lv_font_montserrat_12,
+           locked ? COL_HINT : COL_SUB, outfit_slot_tag(od->slot));
+    llabel(r, 40, 4, 96, &lv_font_montserrat_12,
+           locked ? COL_DIS_TX : COL_INK, od->name);
+    if (locked) {
+        rlabel12(r, 184, 4, COL_DIS_TX, "Locked");
+        return;
+    }
+    char buf[20];
+    if (pt_decor_worn(&s_dsnap, od->slot) == oid) {
+        rlabel12(r, 184, 4, COL_GREEN, "ON");
+    } else if (pt_decor_owns_outfit(&s_dsnap, oid)) {
+        rlabel12(r, 184, 4, COL_BLUE, "Wear");
+    } else if (od->shells > 0) {
+        snprintf(buf, sizeof(buf), "%uS", (unsigned) od->shells);
+        style_price(r, buf, true);
+    } else {
+        snprintf(buf, sizeof(buf), "%luG",
+                 (unsigned long) pt_decor_outfit_price_g(od,
+                                                          s_snap.day_id));
+        style_price(r, buf, false);
+    }
+}
+
+static void style_row_furn(lv_obj_t *r, uint8_t id)
+{
+    const pt_furn_def_t *fd = pt_furn_def((pt_furn_t) id);
+    bool locked = s_snap.stage < fd->min_stage;
+    llabel(r, 10, 4, 120, &lv_font_montserrat_12,
+           locked ? COL_DIS_TX : COL_INK, fd->name);
+    if (locked) {
+        rlabel12(r, 184, 4, COL_DIS_TX, "Locked");
+        return;
+    }
+    char buf[20];
+    if (pt_decor_is_placed(&s_dsnap, (pt_furn_t) id)) {
+        rlabel12(r, 184, 4, COL_GREEN, "PLACED");
+    } else if (pt_decor_owns_furn(&s_dsnap, (pt_furn_t) id)) {
+        rlabel12(r, 184, 4, COL_BLUE, "Place");
+    } else {
+        snprintf(buf, sizeof(buf), "%luG",
+                 (unsigned long) pt_decor_furn_price_g(fd, s_snap.day_id));
+        style_price(r, buf, false);
+    }
+}
+
+static void style_row_theme(lv_obj_t *r, uint8_t id)
+{
+    const pt_theme_def_t *td = pt_theme_def((pt_theme_t) id);
+    // 14x14 r4 壁纸色板（深色主题照常 1px 墨边）。
+    rect(r, 10, 4, 14, 14, 4, td->wall);
+    border(r, COL_INK, 1);
+    llabel(r, 30, 4, 90, &lv_font_montserrat_12, COL_INK, td->name);
+    char buf[20];
+    if ((pt_theme_t) s_dsnap.theme == (pt_theme_t) id) {
+        rlabel12(r, 184, 4, COL_GREEN, "ON");
+    } else if (pt_decor_owns_theme(&s_dsnap, (pt_theme_t) id)) {
+        rlabel12(r, 184, 4, COL_BLUE, "Use");
+    } else if (td->shells > 0) {
+        snprintf(buf, sizeof(buf), "%uS", (unsigned) td->shells);
+        style_price(r, buf, true);
+    } else {
+        snprintf(buf, sizeof(buf), "%uG", (unsigned) td->price);
+        style_price(r, buf, false);
+    }
+}
+
+// 行焦点 + 页脚三档着色（当前档粉填充；焦点 2px 粉框）。
+static void style_mark(void)
+{
+    uint8_t n = style_tab_count();
+    for (uint8_t i = 0; i < n; i += 1) {
+        bool on = (s_dec_sel == i);
+        border(s_t_row[i], on ? COL_SEL : COL_HAIR, on ? 2 : 1);
+    }
+    for (uint8_t k = 0; k < 3; k += 1) {
+        bool cur = (k == s_dec_tab);
+        bool on = (s_dec_sel == (uint8_t) (n + k));
+        lv_obj_set_style_bg_color(s_tf_tab[k],
+            lv_color_hex(cur ? COL_TAB_ON : COL_DOCK_BG), 0);
+        border(s_tf_tab[k], on ? COL_SEL : (cur ? COL_TAB_ON : COL_INK),
+               on ? 2 : 1);
+    }
+}
+
 static void style_build(void)
 {
     lv_obj_clean(s_modal_body);
-    memset(s_list_row, 0, sizeof(s_list_row));
-    s_dec_rows = 0;
+    memset(s_t_row, 0, sizeof(s_t_row));
+    frame_pv2(false);
+    show(s_tfooter);
+    show(s_tshell);
+    lv_label_set_text(s_modal_title, "STYLE");
+    style_chrome();
 
-    uint8_t total = style_tab_count();
-    uint8_t budget = 5;
-    uint8_t pos = 0;
-    for (uint8_t pg = 0;; pg += 1) {
-        uint8_t remaining = (uint8_t) (total - pos);
-        bool has_more = remaining > budget;
-        uint8_t take = has_more ? (uint8_t) (budget - 1) : remaining;
-        if (pg == s_dec_page) {
-            char buf[30];
-            uint8_t row = 0;
-            for (uint8_t i = 0; i < take; i += 1) {
-                uint8_t id = (uint8_t) (pos + i);
-                uint32_t col = COL_INK;
-                if (s_dec_tab == 0) {
-                    pt_outfit_t oid = (pt_outfit_t) (id + 1);
-                    const pt_outfit_def_t *od = pt_outfit_def(oid);
-                    bool owned = pt_decor_owns_outfit(&s_dsnap, oid);
-                    bool worn = pt_decor_worn(&s_dsnap, od->slot) == oid;
-                    if (worn) {
-                        snprintf(buf, sizeof(buf), "%s %s  [%s]",
-                                 outfit_slot_tag(od->slot), od->name, "ON");
-                        col = COL_GREEN;
-                    } else if (owned) {
-                        snprintf(buf, sizeof(buf), "%s %s  Wear",
-                                 outfit_slot_tag(od->slot), od->name);
-                        col = COL_BLUE;
-                    } else if (od->shells > 0) {
-                        snprintf(buf, sizeof(buf), "%s %s  %dS",
-                                 outfit_slot_tag(od->slot), od->name,
-                                 (int) od->shells);
-                    } else {
-                        snprintf(buf, sizeof(buf), "%s %s  %luG",
-                                 outfit_slot_tag(od->slot), od->name,
-                                 (unsigned long) pt_decor_outfit_price_g(
-                                     od, s_snap.day_id));
-                    }
-                } else if (s_dec_tab == 1) {
-                    const pt_furn_def_t *fd = pt_furn_def((pt_furn_t) id);
-                    if (pt_decor_is_placed(&s_dsnap, (pt_furn_t) id)) {
-                        snprintf(buf, sizeof(buf), "%s  [placed]", fd->name);
-                        col = COL_GREEN;
-                    } else if (pt_decor_owns_furn(&s_dsnap, (pt_furn_t) id)) {
-                        snprintf(buf, sizeof(buf), "%s  Place", fd->name);
-                        col = COL_BLUE;
-                    } else {
-                        snprintf(buf, sizeof(buf), "%s  %luG", fd->name,
-                                 (unsigned long) pt_decor_furn_price_g(
-                                     fd, s_snap.day_id));
-                    }
-                } else {
-                    const pt_theme_def_t *td = pt_theme_def((pt_theme_t) id);
-                    if ((pt_theme_t) s_dsnap.theme == (pt_theme_t) id) {
-                        snprintf(buf, sizeof(buf), "%s  [on]", td->name);
-                        col = COL_GREEN;
-                    } else if (pt_decor_owns_theme(&s_dsnap, (pt_theme_t) id)) {
-                        snprintf(buf, sizeof(buf), "%s  Use", td->name);
-                        col = COL_BLUE;
-                    } else if (td->shells > 0) {
-                        snprintf(buf, sizeof(buf), "%s  %dS", td->name,
-                                 (int) td->shells);
-                    } else {
-                        snprintf(buf, sizeof(buf), "%s  %dG", td->name,
-                                 (int) td->price);
-                    }
-                }
-                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
-                                   184, 25, 8, COL_PANEL);
-                label(r, 0, 3, 184, &lv_font_montserrat_14, col, buf);
-                s_list_row[row] = r;
-                s_dec_row_kind[row] = DEC_ROW_ITEM;
-                s_dec_row_id[row] = (uint16_t) id;
-                row += 1;
-            }
-            if (has_more) {
-                lv_obj_t *r = rect(s_modal_body, 4, 4 + (int32_t) row * 28,
-                                   184, 25, 8, COL_PANEL);
-                label(r, 0, 3, 184, &lv_font_montserrat_14, COL_BLUE,
-                      "More >>");
-                s_list_row[row] = r;
-                s_dec_row_kind[row] = DEC_ROW_MORE;
-                s_dec_row_id[row] = 0;
-                row += 1;
-            }
-            const char *next_name = DEC_TAB_NAME[(s_dec_tab + 1) % 3];
-            char tabbuf[20];
-            snprintf(tabbuf, sizeof(tabbuf), "%s >>", next_name);
-            lv_obj_t *tab = rect(s_modal_body, 4, 4 + (int32_t) row * 28, 184,
-                                 25, 8, COL_DOCK_BG);
-            label(tab, 0, 3, 184, &lv_font_montserrat_14, COL_INK, tabbuf);
-            s_list_row[row] = tab;
-            s_dec_row_kind[row] = DEC_ROW_TAB;
-            s_dec_row_id[row] = 0;
-            row += 1;
-            s_dec_rows = row;
-            break;
+    uint8_t n = style_tab_count();
+    for (uint8_t i = 0; i < n; i += 1) {
+        lv_obj_t *r = rect(s_modal_body, 0, (int32_t) i * 24, 192, 22,
+                           8, COL_CARD_WHITE);
+        s_t_row[i] = r;
+        if (s_dec_tab == 0) {
+            style_row_wear(r, i);
+        } else if (s_dec_tab == 1) {
+            style_row_furn(r, i);
+        } else {
+            style_row_theme(r, i);
         }
-        pos = (uint8_t) (pos + take);
     }
 
-    if (s_dec_sel >= s_dec_rows) {
-        s_dec_sel = (uint8_t) (s_dec_rows - 1);
+    // 单环 0..n-1 行，n..n+2 页脚三档；越界夹回首行。
+    if (s_dec_sel > (uint8_t) (n + 2)) {
+        s_dec_sel = 0;
     }
-
-    char title[28];
-    snprintf(title, sizeof(title), "STYLE %s %luG %uS",
-             DEC_TAB_NAME[s_dec_tab], (unsigned long) s_esnap.coins,
-             (unsigned) s_esnap.shells);
-    lv_label_set_text(s_modal_title, title);
-    style_mark_rows();
+    style_mark();
 }
 
 static void style_open(void)
 {
     s_dec_tab = 0;
-    s_dec_page = 0;
     s_dec_sel = 0;
     s_dec_dirty = false;
     s_mode = MODE_DECOR;
@@ -2034,35 +2062,19 @@ static void decor_buy_msg(pt_decor_rv_t rv, bool shells)
 {
     switch (rv) {
     case PT_DECOR_NO_MONEY:
-        set_msg(shells ? "Not enough shells" : "Not enough G", 1100);
+        toast_show(shells ? "Not enough shells" : "Not enough G");
         break;
-    case PT_DECOR_LOCKED: set_msg("Locked", 1100); break;
-    case PT_DECOR_OWNED: set_msg("Already owned", 1100); break;
-    case PT_DECOR_PLACE_CAP: set_msg("3 furniture max", 1100); break;
-    default: set_msg("Can't do that", 1000); break;
+    case PT_DECOR_LOCKED: toast_show("Locked"); break;
+    case PT_DECOR_OWNED: toast_show("Already owned"); break;
+    case PT_DECOR_PLACE_CAP: toast_show("3 furniture max"); break;
+    default: toast_show("Can't do that"); break;
     }
 }
 
+// OK 激活当前行（s_dec_sel < n 时调用）：买下即用/穿戴、再点脱下/收起。
 static void style_activate_row(void)
 {
-    uint8_t kind = s_dec_row_kind[s_dec_sel];
-    uint8_t id = (uint8_t) s_dec_row_id[s_dec_sel];
-
-    if (kind == DEC_ROW_TAB) {
-        s_dec_tab = (uint8_t) ((s_dec_tab + 1) % 3);
-        s_dec_page = 0;
-        s_dec_sel = 0;
-        style_build();
-        pet_audio_play(SND_CONFIRM);
-        return;
-    }
-    if (kind == DEC_ROW_MORE) {
-        s_dec_page += 1;
-        s_dec_sel = 0;
-        style_build();
-        pet_audio_play(SND_CONFIRM);
-        return;
-    }
+    uint8_t id = s_dec_sel;
 
     if (s_dec_tab == 0) {
         pt_outfit_t oid = (pt_outfit_t) (id + 1);
@@ -2107,7 +2119,7 @@ static void style_activate_row(void)
         } else if (pt_decor_owns_furn(&s_dsnap, fid)) {
             pt_decor_t dt = s_dsnap;
             if (pt_decor_place(&dt, fid) != PT_DECOR_OK) {
-                set_msg("3 furniture max", 1100);
+                toast_show("3 furniture max");
                 pet_audio_play(SND_CANCEL);
                 return;
             }
@@ -2133,10 +2145,7 @@ static void style_activate_row(void)
     // 主题页
     pt_theme_t tid = (pt_theme_t) id;
     const pt_theme_def_t *td = pt_theme_def(tid);
-    if (td == NULL) {
-        return;
-    }
-    if ((pt_theme_t) s_dsnap.theme == tid) {
+    if (td == NULL || (pt_theme_t) s_dsnap.theme == tid) {
         return;
     }
     if (!pt_decor_owns_theme(&s_dsnap, tid)) {
@@ -2161,86 +2170,87 @@ static void style_activate_row(void)
 
 static void handle_style_key(pet_ui_action_t act)
 {
+    uint8_t n = style_tab_count();
+    uint8_t ring = (uint8_t) (n + 3);
     if (act == PET_UI_ACT_PREV) {
-        s_dec_sel = (uint8_t) ((s_dec_sel + s_dec_rows - 1) % s_dec_rows);
-        style_mark_rows();
+        s_dec_sel = (uint8_t) ((s_dec_sel + ring - 1) % ring);
+        style_mark();
     } else if (act == PET_UI_ACT_NEXT) {
-        s_dec_sel = (uint8_t) ((s_dec_sel + 1) % s_dec_rows);
-        style_mark_rows();
+        s_dec_sel = (uint8_t) ((s_dec_sel + 1) % ring);
+        style_mark();
     } else if (act == PET_UI_ACT_CONFIRM) {
-        style_activate_row();
-    } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+        if (s_dec_sel >= n) {
+            // 页脚档丸：直接切到该档，行焦点归 0。
+            s_dec_tab = (uint8_t) (s_dec_sel - n);
+            s_dec_sel = 0;
+            style_build();
+            pet_audio_play(SND_CONFIRM);
+        } else {
+            style_activate_row();
+        }
+    } else if (act == PET_UI_ACT_BACK) {
         pet_audio_play(SND_CANCEL);
-        shop_open();   // 返回商店/背包弹层
+        shop_open();   // 长按：返回商店/背包弹层
+    } else if (act == PET_UI_ACT_MENU) {
+        pet_audio_play(SND_CANCEL);
+        modal_close(); // 双击：直接回房间
     }
 }
 
+// PV2 batch6：每日签到（定稿 pv2-checkin.html）。主体仪式布局 + 单颗 CLAIM
+// 丸（环长 1）；OK 领取，长按/双击跳过。几何为主体 (8,42) 192x156 坐标。
 static void checkin_build(void)
 {
     lv_obj_clean(s_modal_body);
-    // PV2 batch2：发丝线沿用，但主体下延到面板底边容纳 OK/skip 两行提示，
-    // 页脚与通用 hold-OK 提示都隐藏（自带操作提示）。
-    lv_obj_set_pos(s_modal_body, 8, 42);
-    lv_obj_set_size(s_modal_body, 192, 196);
-    show(s_mhair);
-    hide(s_mcoin);
-    hide(s_mp_prev);
-    hide(s_mp_cur);
-    hide(s_mp_next);
-    hide(s_mfooter);
-    hide(s_sfooter);
-    hide(s_mback);
-    hide(s_toast_box);
-    if (s_toast_timer != NULL) {
-        lv_timer_delete(s_toast_timer);
-        s_toast_timer = NULL;
-    }
+    frame_pv2(false);
+    show(s_cclaim);
     lv_label_set_text(s_modal_title, "DAILY BONUS");
+    lv_label_set_text(s_mback, "hold OK - skip");
 
     char buf[24];
     uint16_t day = (uint16_t) (s_esnap.streak + 1);
     bool week = day >= 7;
 
-    // 56x56 礼品图（28px 位图整倍放大，pivot 在 28 盒中心）。
-    lv_obj_t *gift = icon_img(s_modal_body, 68, 12,
+    // 56x56 礼品图（28px 位图整倍放大，pivot 在 28 盒中心），body (68,10)。
+    lv_obj_t *gift = icon_img(s_modal_body, 68, 10,
                               pet_ui_card_dsc(PET_UI_CARD_GIFT));
     lv_obj_set_style_transform_pivot_x(gift, 14, 0);
     lv_obj_set_style_transform_pivot_y(gift, 14, 0);
     lv_obj_set_style_transform_scale(gift, 512, 0);
 
     snprintf(buf, sizeof(buf), "Day %u of 7", (unsigned) day);
-    label(s_modal_body, 0, 85, 192, &lv_font_montserrat_14, COL_INK,
+    label(s_modal_body, 0, 64, 192, &lv_font_montserrat_14, COL_INK,
           week ? "7-day streak!" : buf);
 
-    // 7 连签小灯：已领黄、今天粉、未到灰。
+    // 7 连签小灯（总宽 85 居中，body 起 x54，y86）：已领黄、今天粉、未到灰。
     for (uint8_t i = 0; i < 7; i += 1) {
-        int32_t x = 53 + (int32_t) i * 13;
+        int32_t x = 54 + (int32_t) i * 13;
         if ((uint16_t) i < day - 1U) {
-            lv_obj_t *d = rect(s_modal_body, x, 108, 7, 7, 2, COL_COIN_BG);
+            lv_obj_t *d = rect(s_modal_body, x, 86, 7, 7, 2, COL_COIN_BG);
             border(d, COL_INK, 1);
         } else if ((uint16_t) i == day - 1U) {
-            lv_obj_t *d = rect(s_modal_body, x, 108, 7, 7, 2, COL_TAB_ON);
+            lv_obj_t *d = rect(s_modal_body, x, 86, 7, 7, 2, COL_TAB_ON);
             border(d, COL_INK, 1);
         } else {
-            rect(s_modal_body, x, 108, 7, 7, 2, COL_PIP_OFF);
+            rect(s_modal_body, x, 86, 7, 7, 2, COL_PIP_OFF);
         }
     }
 
-    int32_t pw = week ? 76 : 64;
-    lv_obj_t *pill = rect(s_modal_body, (192 - pw) / 2, 124, pw, 20, 10,
-                          COL_COIN_BG);
-    border(pill, COL_INK, 1);
-    label(pill, 0, 3, pw, &lv_font_montserrat_12, COL_INK,
-          week ? "100 G" : "20 G");
+    // 奖励白卡丸（h22 r11 发丝边）：5px 金币点 + 12px 棕字。
+    const char *rtxt = week ? "100 G" : "20 G";
+    int32_t tw = text_w12(rtxt);
+    int32_t pw = week ? 84 : 72;
+    int32_t px = (192 - pw) / 2;
+    lv_obj_t *pill = rect(s_modal_body, px, 102, pw, 22, 11, COL_CARD_WHITE);
+    border(pill, COL_HAIR, 1);
+    int32_t gx = (pw - (tw + 8)) / 2;
+    rect(pill, gx, 8, 5, 5, 2, COL_COIN_BG);
+    llabel(pill, gx + 8, 4, tw + 1, &lv_font_montserrat_12, COL_BROWN, rtxt);
 
     if (week) {
-        label(s_modal_body, 0, 150, 192, &lv_font_montserrat_12, COL_BLUE,
+        label(s_modal_body, 0, 128, 192, &lv_font_montserrat_12, COL_BLUE,
               "+1 shell ticket");
     }
-    label(s_modal_body, 0, 161, 192, &lv_font_montserrat_12, COL_INK,
-          "OK - claim");
-    label(s_modal_body, 0, 177, 192, &lv_font_montserrat_12, COL_HINT,
-          "hold OK - skip");
 }
 
 static void checkin_open(void)
@@ -2253,8 +2263,9 @@ static void checkin_open(void)
 static void handle_checkin_key(pet_ui_action_t act)
 {
     if (act == PET_UI_ACT_CONFIRM) {
+        bool week = (uint16_t) (s_esnap.streak + 1) >= 7;
         pet_app_econ_checkin();
-        set_msg("20G  thank you!", 1200);
+        set_msg(week ? "100G +1 shell!" : "20G  thank you!", 1200);
         pet_audio_play(SND_HAPPY);
         modal_close();
     } else if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
@@ -2271,19 +2282,10 @@ static void handle_checkin_key(pet_ui_action_t act)
 
 static pt_social_t s_ssnap;
 static bool s_have_ssnap;
-static int s_mate_level;     // 0=候选列表，1=动作列表，2=家谱
-static int s_mate_sel;       // 当前页选中行
-static int s_mate_ci;        // 动作页对应的候选槽位
+static int s_mate_level;     // 0=主视图（VISIT/已婚/蛋就绪，相位驱动），1=动作页，2=家谱
+static int s_mate_sel;       // 当前焦点环索引
+static int s_mate_ci;        // 动作页候选槽位
 static int8_t s_mate_page;   // 家谱页码
-static int8_t s_mate_tree_from;  // 家谱返回页（0/1=已婚页）
-static lv_obj_t *s_mate_sel_box;
-
-static void mate_mark_selected(void)
-{
-    if (s_mate_sel_box != NULL) {
-        border(s_mate_sel_box, COL_SEL, 3);
-    }
-}
 
 static const char *mate_soc_msg(uint8_t rv)
 {
@@ -2298,246 +2300,412 @@ static const char *mate_soc_msg(uint8_t rv)
     }
 }
 
-static void mate_build(void)
+// 关系阶段着色（冻结稿 pv2-mate.html）：Met 灰 / Friend 蓝 / Crush 粉 / Love 绿。
+static uint32_t mate_stage_color(uint8_t bond)
+{
+    switch (pt_social_rel_stage(bond)) {
+    case PT_REL_FRIEND: return COL_BLUE;
+    case PT_REL_CRUSH:  return COL_SEL;
+    case PT_REL_LOVE:   return COL_GREEN;
+    default:            return COL_HINT;
+    }
+}
+
+// 名片基因 -> 小色牌（零位图）：调色板主色 + 2px 轮廓 + 两只小眼（深底白眼）。
+static void mate_token(lv_obj_t *parent, int32_t x, int32_t y, int32_t sz,
+                       const pt_genome_t *g)
+{
+    const pt_palette_t *pal = pt_genome_palette(pt_part_index(g->palette));
+    uint32_t body = (pal != NULL) ? pal->main : (uint32_t) COL_PIP_OFF;
+    uint32_t edge = (pal != NULL && pal->edge != 0)
+                    ? pal->edge : (uint32_t) COL_INK;
+    lv_obj_t *tok = rect(parent, x, y, sz, sz, sz >= 30 ? 10 : 8, body);
+    border(tok, edge, 2);
+    uint32_t r = (body >> 16) & 0xFFu;
+    uint32_t gg = (body >> 8) & 0xFFu;
+    uint32_t bb = body & 0xFFu;
+    uint32_t ec = (r * 299 + gg * 587 + bb * 114 < 128000u)
+                  ? 0xFFFFFFu : (uint32_t) COL_INK;
+    int32_t ew = sz >= 30 ? 3 : 2;
+    int32_t ex = sz >= 30 ? 9 : 8;
+    int32_t ey = sz >= 30 ? 13 : 11;
+    int32_t gap = sz >= 30 ? 8 : 7;
+    rect(tok, ex, ey, ew, ew, 1, ec);
+    rect(tok, ex + gap, ey, ew, ew, 1, ec);
+}
+
+// 收集有效候选槽位，返回数量。
+static uint8_t mate_slots(uint8_t *slots)
+{
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < PT_SOC_CANDIDATES; i += 1) {
+        if (s_ssnap.cand[i].valid) {
+            slots[n++] = i;
+        }
+    }
+    return n;
+}
+
+// 候选槽位 -> 名单中的次序（动作页返回时恢复焦点）。
+static int mate_ordinal_of(uint8_t ci)
+{
+    uint8_t slots[PT_SOC_CANDIDATES];
+    uint8_t n = mate_slots(slots);
+    for (uint8_t k = 0; k < n; k += 1) {
+        if (slots[k] == ci) {
+            return (int) k;
+        }
+    }
+    return 0;
+}
+
+static uint8_t mate_tree_pages(void)
+{
+    uint8_t hc = pt_social_hall_count(&s_ssnap);
+    uint8_t pages = (uint8_t) ((hc + 2) / 3);
+    return pages == 0 ? 1 : pages;
+}
+
+static void mate_frame(const char *page)
 {
     lv_obj_clean(s_modal_body);
-    s_mate_sel_box = NULL;
-
-    char title[26];
-    snprintf(title, sizeof(title), "FAMILY  %luG",
-             (unsigned long) s_esnap.coins);
-    lv_label_set_text(s_modal_title, title);
-
-    // 家谱页（S3b）：只读，UP/DOWN 翻页，OK/BACK 返回。
-    if (s_mate_level == 2) {
-        uint8_t hc = pt_social_hall_count(&s_ssnap);
-        char head[28];
-        uint8_t pages = (uint8_t) ((hc + 2) / 3);
-        if (pages == 0) {
-            pages = 1;
-        }
-        if (s_mate_page >= pages) {
-            s_mate_page = (int8_t) (pages - 1);
-        }
-        snprintf(head, sizeof(head), "FAMILY TREE %d/%d",
-                 (int) s_mate_page + 1, (int) pages);
-        label(s_modal_body, 0, 2, 192, &lv_font_montserrat_14, COL_DIM, head);
-        for (uint8_t k = 0; k < 3; k += 1) {
-            // 最新一代在前：hall 为 FIFO。
-            int idx = (int) hc - 1 - (s_mate_page * 3 + k);
-            if (idx < 0) {
-                break;
-            }
-            const pt_soc_hall_t *h = pt_social_hall_entry(&s_ssnap,
-                                                           (uint8_t) idx);
-            int y = 20 + k * 46;
-            lv_obj_t *box = rect(s_modal_body, 0, y, 192, 42, 8, COL_PANEL);
-            char pn[8], mn[8];
-            pt_social_name(&h->pet, pn, sizeof(pn));
-            static const char *const CAREW[4] = {
-                "Perfect", "Great", "Normal", "Neglect"
-            };
-            const char *cw = (h->care < 4) ? CAREW[h->care] : "Normal";
-            char line[40];
-            snprintf(line, sizeof(line), "G%lu %s",
-                     (unsigned long) h->generation, pn);
-            label(box, 6, 2, 90, &lv_font_montserrat_14, COL_INK, line);
-            snprintf(line, sizeof(line), "%s",
-                     species_name((pt_species_t) h->species));
-            label(box, 92, 2, 94, &lv_font_montserrat_14, COL_BLUE, line);
-            bool mated = false;
-            for (uint8_t b = 0; b < 8; b += 1) {
-                const uint8_t *raw = (const uint8_t *) &h->mate;
-                if (raw[b] != 0) { mated = true; break; }
-            }
-            if (mated) {
-                pt_social_name(&h->mate, mn, sizeof(mn));
-                snprintf(line, sizeof(line), "Care %s  +%s", cw, mn);
-            } else {
-                snprintf(line, sizeof(line), "Care %s", cw);
-            }
-            label(box, 6, 21, 180, &lv_font_montserrat_14, COL_DIM, line);
-        }
-        lv_obj_t *back = rect(s_modal_body, 56, 160, 80, 24, 8, COL_DOCK_BG);
-        label(back, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Back");
-        s_mate_sel_box = back;
-        mate_mark_selected();
-        return;
+    frame_pv2(false);
+    show(s_mffooter);
+    lv_label_set_text(s_modal_title, "FAMILY");
+    chrome_coins(s_esnap.coins);
+    if (page != NULL) {
+        lv_label_set_text(s_mp_cur, page);
+        lv_obj_set_pos(s_mp_cur, 91, 15);
+        show(s_mp_cur);
     }
+}
 
-    if (s_ssnap.phase == PT_SOC_MARRIED
-        || s_ssnap.phase == PT_SOC_EGG_READY) {
-        char nm[8];
-        pt_social_name(&s_ssnap.spouse, nm, sizeof(nm));
-        label(s_modal_body, 0, 26, 192, &lv_font_montserrat_20, COL_INK,
-              "Married");
-        char line[32];
-        snprintf(line, sizeof(line), "to %s", nm);
-        label(s_modal_body, 0, 56, 192, &lv_font_montserrat_14, COL_DIM, line);
-        if (s_ssnap.phase == PT_SOC_EGG_READY) {
-            label(s_modal_body, 0, 86, 192, &lv_font_montserrat_14, COL_RED,
-                  "An egg is on the way!");
-        } else {
-            int32_t left = pt_social_egg_minutes_left(&s_ssnap, s_snap.minute);
-            if (left > 0) {
-                snprintf(line, sizeof(line), "Egg in %ldh %ldm",
-                         (long) (left / 60), (long) (left % 60));
-                label(s_modal_body, 0, 86, 192, &lv_font_montserrat_14,
-                      COL_GREEN, line);
-            }
-        }
-        // 行：迎接新蛋（仅蛋就绪）/家谱（有名人堂条目）/返回。
-        uint8_t rows = 0;
-        bool has_tree = pt_social_hall_count(&s_ssnap) > 0;
-        int8_t egg_row = -1, tree_row = -1, back_row = -1;
-        int y = 118;
-        if (s_ssnap.phase == PT_SOC_EGG_READY) {
-            egg_row = (int8_t) rows;
-            lv_obj_t *b = rect(s_modal_body, 16, y, 160, 24, 8, COL_GREEN);
-            label(b, 0, 3, 160, &lv_font_montserrat_14, COL_PANEL,
-                  "Welcome the egg!");
-            if (s_mate_sel == rows) { s_mate_sel_box = b; }
-            rows += 1;
-            y += 26;
-        }
-        if (has_tree) {
-            tree_row = (int8_t) rows;
-            lv_obj_t *b = rect(s_modal_body, 16, y, 160, 24, 8, COL_PANEL);
-            label(b, 0, 3, 160, &lv_font_montserrat_14, COL_INK, "Family Tree");
-            if (s_mate_sel == rows) { s_mate_sel_box = b; }
-            rows += 1;
-            y += 26;
-        }
-        back_row = (int8_t) rows;
-        lv_obj_t *back = rect(s_modal_body, 56, y, 80, 24, 8, COL_DOCK_BG);
-        label(back, 0, 3, 80, &lv_font_montserrat_14, COL_INK, "Back");
-        if (s_mate_sel == rows) { s_mate_sel_box = back; }
-        rows += 1;
-        (void) egg_row; (void) tree_row; (void) back_row;
-        if (s_mate_sel >= rows) { s_mate_sel = 0; }
-        mate_mark_selected();
-        return;
+// 页脚三态：MF_DUAL=BACK/TREE（TREE 名人堂空时灰禁但占环位）；
+// MF_BACK=仅 BACK；MF_PAGER=‹ BACK ›（循环翻页，箭头永不灰禁）。
+enum { MF_DUAL = 0, MF_BACK = 1, MF_PAGER = 2 };
+
+static void mate_pill_style(lv_obj_t *w, bool on, bool off)
+{
+    lv_obj_set_style_bg_color(w,
+        lv_color_hex(off ? COL_DIS_BG : COL_DOCK_BG), 0);
+    border(w, on ? COL_SEL : (off ? COL_DIS_LINE : COL_INK), on ? 2 : 1);
+    lv_obj_t *txt = (lv_obj_t *) lv_obj_get_child(w, 0);
+    lv_obj_set_style_text_color(txt,
+        lv_color_hex(off ? COL_DIS_TX : COL_INK), 0);
+}
+
+// DUAL 态 sel：-1 无焦点 / 0=BACK / 1=TREE；MF_BACK：0；PAGER：0/1/2。
+static void mate_footer_refresh(int mode, int sel, bool tree_off)
+{
+    hide(s_mf_back);
+    hide(s_mf_tree);
+    hide(s_mf_prev);
+    hide(s_mf_mid);
+    hide(s_mf_next);
+    if (mode == MF_DUAL) {
+        show(s_mf_back);
+        show(s_mf_tree);
+        mate_pill_style(s_mf_back, sel == 0, false);
+        mate_pill_style(s_mf_tree, sel == 1, tree_off);
+    } else if (mode == MF_BACK) {
+        show(s_mf_back);
+        mate_pill_style(s_mf_back, sel == 0, false);
+    } else {
+        show(s_mf_prev);
+        show(s_mf_mid);
+        show(s_mf_next);
+        mate_pill_style(s_mf_prev, sel == 0, false);
+        mate_pill_style(s_mf_mid, sel == 1, false);
+        mate_pill_style(s_mf_next, sel == 2, false);
     }
+}
 
-    if (s_mate_level == 0) {
-        label(s_modal_body, 0, 2, 192, &lv_font_montserrat_14, COL_DIM,
-              "Today's visitors");
-        uint8_t slots[PT_SOC_CANDIDATES];
-        uint8_t n = 0;
-        for (uint8_t i = 0; i < PT_SOC_CANDIDATES; i += 1) {
-            if (s_ssnap.cand[i].valid) {
-                slots[n++] = i;
-            }
-        }
-        if (n == 0) {
-            label(s_modal_body, 0, 60, 192, &lv_font_montserrat_14, COL_DIM,
-                  "Nobody yet");
-            label(s_modal_body, 0, 84, 192, &lv_font_montserrat_14, COL_DIM,
-                  "Matchmaker visits mornings");
-        }
-        int row = 0;
+// ---------------------------------------------------------------------------
+// VISIT：今日访客卡（n<=3）-> BACK -> TREE 单环。
+// ---------------------------------------------------------------------------
+
+static void mate_build_visit(void)
+{
+    mate_frame(NULL);
+    uint8_t slots[PT_SOC_CANDIDATES];
+    uint8_t n = mate_slots(slots);
+    bool tree_off = pt_social_hall_count(&s_ssnap) == 0;
+
+    llabel(s_modal_body, 0, 0, 120, &lv_font_montserrat_12, COL_HINT,
+           "Today's visitors");
+
+    if (n == 0) {
+        label(s_modal_body, 0, 50, 192, &lv_font_montserrat_12, COL_SUB,
+              "Nobody yet");
+        label(s_modal_body, 0, 68, 192, &lv_font_montserrat_12, COL_HINT,
+              "Matchmaker visits mornings");
+    } else {
+        char buf[24];
         for (uint8_t k = 0; k < n; k += 1) {
             const pt_soc_cand_t *c = &s_ssnap.cand[slots[k]];
-            int y = 24 + k * 46;
-            lv_obj_t *box = rect(s_modal_body, 0, y, 192, 42, 8, COL_PANEL);
-            char nm[8];
-            pt_social_name(&c->genome, nm, sizeof(nm));
-            char line[40];
-            snprintf(line, sizeof(line), "%s - %s", nm,
-                     pt_personality_name((pt_personality_t)
-                                         c->genome.personality));
-            label(box, 6, 3, 180, &lv_font_montserrat_14, COL_INK, line);
-            snprintf(line, sizeof(line), "%s %d   %d/%d visits",
-                     pt_social_rel_name(pt_social_rel_stage(c->bond)),
-                     (int) c->bond, (int) c->interacts_today,
-                     PT_CFG_SOC_INTERACT_DAY_CAP);
-            label(box, 6, 22, 180, &lv_font_montserrat_14, COL_BLUE, line);
-            if (s_mate_sel == row) {
-                s_mate_sel_box = box;
-            }
-            row += 1;
+            int y = 16 + (int) k * 38;
+            bool on = (s_mate_sel == (int) k);
+            lv_obj_t *card = rect(s_modal_body, 0, y, 192, 34, 10,
+                                  COL_CARD_WHITE);
+            border(card, on ? COL_SEL : COL_HAIR, on ? 2 : 1);
+            mate_token(card, 8, 5, 24, &c->genome);
+
+            pt_social_name(&c->genome, buf, sizeof(buf));
+            llabel(card, 42, 3, 90, &lv_font_montserrat_14, COL_INK, buf);
+
+            snprintf(buf, sizeof(buf), "%u/%u",
+                     (unsigned) c->interacts_today,
+                     (unsigned) PT_CFG_SOC_INTERACT_DAY_CAP);
+            rlabel12(card, 184, 4, COL_SUB, buf);
+
+            const char *rn = pt_social_rel_name(pt_social_rel_stage(c->bond));
+            llabel(card, 42, 18, 44, &lv_font_montserrat_12,
+                   mate_stage_color(c->bond), rn);
+            snprintf(buf, sizeof(buf), "%u", (unsigned) c->bond);
+            llabel(card, 42 + text_w12(rn) + 4, 18, 24,
+                   &lv_font_montserrat_12, COL_INK, buf);
         }
-        bool has_tree = pt_social_hall_count(&s_ssnap) > 0;
-        int by = 24 + n * 46;
-        if (has_tree) {
-            lv_obj_t *tb = rect(s_modal_body, 16, by, 160, 24, 8, COL_PANEL);
-            label(tb, 0, 3, 160, &lv_font_montserrat_14, COL_INK,
-                  "Family Tree");
-            if (s_mate_sel == row) {
-                s_mate_sel_box = tb;
-            }
-            row += 1;
-            by += 26;
-        }
-        lv_obj_t *back = rect(s_modal_body, 56, by, 80, 26, 8,
-                              COL_DOCK_BG);
-        label(back, 0, 4, 80, &lv_font_montserrat_14, COL_INK, "Back");
-        if (s_mate_sel == row) {
-            s_mate_sel_box = back;
-        }
-        if (s_mate_sel > row) {
-            s_mate_sel = 0;
-        }
-        mate_mark_selected();
-        return;
     }
 
-    // 动作页
+    int ring = (int) n + 2;
+    if (s_mate_sel < 0 || s_mate_sel >= ring) {
+        s_mate_sel = 0;
+    }
+    int fsel = (s_mate_sel == (int) n) ? 0
+             : (s_mate_sel == (int) n + 1) ? 1 : -1;
+    mate_footer_refresh(MF_DUAL, fsel, tree_off);
+}
+
+// ---------------------------------------------------------------------------
+// 动作页：身份卡 + 好感条 + Greet/Gift/Propose x2 -> BACK 单环（5）。
+// ---------------------------------------------------------------------------
+
+static void mate_build_action(void)
+{
     const pt_soc_cand_t *c =
         (s_mate_ci < PT_SOC_CANDIDATES && s_ssnap.cand[s_mate_ci].valid)
         ? &s_ssnap.cand[s_mate_ci] : NULL;
     if (c == NULL) {
         s_mate_level = 0;
         s_mate_sel = 0;
-        mate_build();
+        mate_build_visit();
         return;
     }
-    char nm[8];
-    pt_social_name(&c->genome, nm, sizeof(nm));
-    char head[40];
-    snprintf(head, sizeof(head), "%s - %s", nm,
-             pt_personality_name((pt_personality_t) c->genome.personality));
-    label(s_modal_body, 0, 0, 192, &lv_font_montserrat_14, COL_INK, head);
-    snprintf(head, sizeof(head), "%s %d",
-             pt_social_rel_name(pt_social_rel_stage(c->bond)), (int) c->bond);
-    label(s_modal_body, 0, 19, 192, &lv_font_montserrat_14, COL_BLUE, head);
-    // 好感条
+
+    mate_frame(NULL);
+    char buf[24];
+
+    lv_obj_t *idc = rect(s_modal_body, 0, 0, 192, 34, 10, COL_CARD_WHITE);
+    border(idc, COL_HAIR, 1);
+    mate_token(idc, 8, 5, 24, &c->genome);
+    pt_social_name(&c->genome, buf, sizeof(buf));
+    llabel(idc, 42, 3, 90, &lv_font_montserrat_14, COL_INK, buf);
+    snprintf(buf, sizeof(buf), "%u/%u visits",
+             (unsigned) c->interacts_today,
+             (unsigned) PT_CFG_SOC_INTERACT_DAY_CAP);
+    rlabel12(idc, 184, 4, COL_SUB, buf);
+    const char *rn = pt_social_rel_name(pt_social_rel_stage(c->bond));
+    llabel(idc, 42, 18, 44, &lv_font_montserrat_12,
+           mate_stage_color(c->bond), rn);
+    snprintf(buf, sizeof(buf), "%u", (unsigned) c->bond);
+    llabel(idc, 42 + text_w12(rn) + 4, 18, 24,
+           &lv_font_montserrat_12, COL_INK, buf);
+
+    // 好感条（灰轨 + 绿填充 bond%）。
     rect(s_modal_body, 4, 40, 184, 6, 3, COL_PIP_OFF);
     int32_t fw = (int32_t) c->bond * 184 / 100;
     if (fw > 0) {
         rect(s_modal_body, 4, 40, fw, 6, 3, COL_GREEN);
     }
-    static const char *const ACT[5] = {
-        "Greet", "Gift 80G", "Propose 500G", "Propose 5000G", "Back",
+
+    static const char *const ACT[4] = {
+        "Greet", "Gift", "Propose 500G", "Propose 5000G"
     };
-    for (int i = 0; i < 5; i += 1) {
-        int y = 56 + i * 26;
-        lv_obj_t *box = rect(s_modal_body, 16, y, 160, 24, 8, COL_PANEL);
-        uint32_t col = (i == 2) ? COL_BLUE : (i == 3 ? COL_YELLOW : COL_INK);
-        label(box, 0, 3, 160, &lv_font_montserrat_14, col, ACT[i]);
-        if (s_mate_sel == i) {
-            s_mate_sel_box = box;
+    static const uint32_t ACTC[4] = {
+        COL_INK, COL_INK, COL_BLUE, COL_BROWN
+    };
+    for (int i = 0; i < 4; i += 1) {
+        int y = 52 + i * 24;
+        bool on = (s_mate_sel == i);
+        lv_obj_t *row = rect(s_modal_body, 0, y, 192, 22, 8, COL_CARD_WHITE);
+        border(row, on ? COL_SEL : COL_HAIR, on ? 2 : 1);
+        llabel(row, 12, 4, 120, &lv_font_montserrat_12, ACTC[i], ACT[i]);
+        if (i == 1) {
+            rlabel12(row, 180, 4, COL_BROWN, "80G");
         }
     }
-    mate_mark_selected();
+
+    if (s_mate_sel < 0 || s_mate_sel > 4) {
+        s_mate_sel = 0;
+    }
+    mate_footer_refresh(MF_BACK, s_mate_sel == 4 ? 0 : -1, false);
 }
 
-static uint8_t mate_level0_rows(void)
+// ---------------------------------------------------------------------------
+// 已婚等蛋 / 蛋就绪：双宠 token + 状态卡；蛋就绪追加 Welcome 大按钮。
+// ---------------------------------------------------------------------------
+
+static void mate_build_married(void)
 {
-    return (uint8_t) (pt_social_candidate_count(&s_ssnap)
-                      + (pt_social_hall_count(&s_ssnap) > 0 ? 1 : 0) + 1);
+    bool egg = s_ssnap.phase == PT_SOC_EGG_READY;
+    mate_frame(NULL);
+    bool tree_off = pt_social_hall_count(&s_ssnap) == 0;
+
+    // 双宠色牌水平交叠 4px：玩家 + 配偶。
+    int32_t ty = egg ? 8 : 16;
+    mate_token(s_modal_body, 62, ty, 36, &s_snap.genome);
+    mate_token(s_modal_body, 94, ty, 36, &s_ssnap.spouse);
+
+    label(s_modal_body, 0, egg ? 42 : 56, 192,
+          &lv_font_montserrat_20, COL_INK, "Married");
+    char nm[8];
+    pt_social_name(&s_ssnap.spouse, nm, sizeof(nm));
+    char buf[24];
+    snprintf(buf, sizeof(buf), "to %s", nm);
+    label(s_modal_body, 0, egg ? 70 : 86, 192,
+          &lv_font_montserrat_12, COL_SUB, buf);
+
+    int32_t cy = egg ? 92 : 108;
+    lv_obj_t *sc = rect(s_modal_body, 0, cy, 192, egg ? 28 : 30, 10,
+                        COL_CARD_WHITE);
+    border(sc, COL_HAIR, 1);
+    const char *stxt;
+    uint32_t scol;
+    if (egg) {
+        stxt = "An egg is on the way!";
+        scol = COL_RED;
+    } else {
+        int32_t left = pt_social_egg_minutes_left(&s_ssnap, s_snap.minute);
+        if (left > 0) {
+            snprintf(buf, sizeof(buf), "Egg in %ldh %ldm",
+                     (long) (left / 60), (long) (left % 60));
+            stxt = buf;
+        } else {
+            stxt = "Egg soon";
+        }
+        scol = COL_GREEN;
+    }
+    rect(sc, 14, egg ? 10 : 11, 8, 8, 2, scol);
+    llabel(sc, 30, egg ? 7 : 8, 156, &lv_font_montserrat_12, scol, stxt);
+
+    int ring;
+    if (egg) {
+        bool on = (s_mate_sel == 0);
+        lv_obj_t *b = rect(s_modal_body, 16, 126, 160, 26, 12, COL_GREEN);
+        border(b, on ? COL_SEL : COL_GREEN, on ? 2 : 0);
+        label(b, 0, 5, 160, &lv_font_montserrat_12, COL_CARD_WHITE,
+              "Welcome the egg!");
+        ring = 3;
+    } else {
+        ring = 2;
+    }
+    if (s_mate_sel < 0 || s_mate_sel >= ring) {
+        s_mate_sel = 0;
+    }
+    // DUAL 页脚焦点位：BACK / TREE 在环内的绝对序号。
+    int back_idx = egg ? 1 : 0;
+    int tree_idx = egg ? 2 : 1;
+    int fsel = (s_mate_sel == back_idx) ? 0
+             : (s_mate_sel == tree_idx) ? 1 : -1;
+    mate_footer_refresh(MF_DUAL, fsel, tree_off);
 }
 
-// 已婚/蛋就绪页行数：迎接新蛋（蛋就绪）+ 家谱 + Back。
-static uint8_t mate_married_rows(void)
+// ---------------------------------------------------------------------------
+// 家谱：每屏最多 3 张世代卡（最新一代在前），‹ BACK › 循环翻页。
+// ---------------------------------------------------------------------------
+
+static void mate_build_tree(void)
 {
-    return (uint8_t) ((s_ssnap.phase == PT_SOC_EGG_READY ? 1 : 0)
-                      + (pt_social_hall_count(&s_ssnap) > 0 ? 1 : 0) + 1);
+    uint8_t hc = pt_social_hall_count(&s_ssnap);
+    uint8_t pages = mate_tree_pages();
+    if (s_mate_page < 0) {
+        s_mate_page = 0;
+    }
+    if (s_mate_page >= (int) pages) {
+        s_mate_page = (int8_t) (pages - 1);
+    }
+
+    char pg[8];
+    snprintf(pg, sizeof(pg), "%u/%u", (unsigned) s_mate_page + 1,
+             (unsigned) pages);
+    mate_frame(pg);
+
+    static const char *const CAREW[4] = {
+        "Perfect", "Great", "Normal", "Neglect"
+    };
+
+    for (uint8_t k = 0; k < 3; k += 1) {
+        int idx = (int) hc - 1 - (s_mate_page * 3 + k);
+        if (idx < 0) {
+            break;
+        }
+        const pt_soc_hall_t *h = pt_social_hall_entry(&s_ssnap,
+                                                      (uint8_t) idx);
+        int y = (int) k * 46;
+        lv_obj_t *card = rect(s_modal_body, 0, y, 192, 42, 10,
+                              COL_CARD_WHITE);
+        border(card, COL_HAIR, 1);
+
+        char line[40];
+        char pn[8];
+        pt_social_name(&h->pet, pn, sizeof(pn));
+        snprintf(line, sizeof(line), "G%lu %s",
+                 (unsigned long) h->generation, pn);
+        llabel(card, 8, 4, 100, &lv_font_montserrat_14, COL_INK, line);
+
+        lv_obj_t *sp = llabel(card, 84, 4, 100, &lv_font_montserrat_14,
+                              COL_BLUE, species_name((pt_species_t)
+                                                     h->species));
+        lv_obj_set_style_text_align(sp, LV_TEXT_ALIGN_RIGHT, 0);
+
+        bool mated = false;
+        const uint8_t *raw = (const uint8_t *) &h->mate;
+        for (uint8_t b = 0; b < 8; b += 1) {
+            if (raw[b] != 0) {
+                mated = true;
+                break;
+            }
+        }
+        const char *cw = (h->care < 4) ? CAREW[h->care] : "Normal";
+        if (mated) {
+            char mn[8];
+            pt_social_name(&h->mate, mn, sizeof(mn));
+            snprintf(line, sizeof(line), "Care %s  +%s", cw, mn);
+        } else {
+            snprintf(line, sizeof(line), "Care %s", cw);
+        }
+        llabel(card, 8, 21, 176, &lv_font_montserrat_12, COL_SUB, line);
+    }
+
+    if (s_mate_sel < 0 || s_mate_sel > 2) {
+        s_mate_sel = 0;
+    }
+    mate_footer_refresh(MF_PAGER, s_mate_sel, false);
 }
 
-static void mate_open_tree(int8_t from_level)
+static void mate_build(void)
 {
-    s_mate_tree_from = (int8_t) from_level;
+    // 家谱只读页优先。
+    if (s_mate_level == 2) {
+        mate_build_tree();
+        return;
+    }
+    // 已婚/蛋就绪为相位驱动视图；求婚成功后动作页重建自然落到这里。
+    if (s_ssnap.phase == PT_SOC_MARRIED
+        || s_ssnap.phase == PT_SOC_EGG_READY) {
+        s_mate_level = 0;
+        mate_build_married();
+        return;
+    }
+    if (s_mate_level == 1) {
+        mate_build_action();
+        return;
+    }
+    mate_build_visit();
+}
+
+static void mate_open_tree(void)
+{
     s_mate_level = 2;
     s_mate_page = 0;
     s_mate_sel = 0;
@@ -2563,63 +2731,82 @@ static void mate_open(void)
 
 static void handle_mate_key(pet_ui_action_t act)
 {
-    // 家谱页：UP/DOWN 翻页，确认/返回回到来源页。
+    // ---- 家谱：‹ BACK › 环，OK 翻页/返回 ----
     if (s_mate_level == 2) {
-        if (act == PET_UI_ACT_PREV || act == PET_UI_ACT_NEXT) {
-            uint8_t hc = pt_social_hall_count(&s_ssnap);
-            uint8_t pages = (uint8_t) ((hc + 2) / 3);
-            if (pages == 0) {
-                pages = 1;
-            }
-            if (act == PET_UI_ACT_PREV) {
-                s_mate_page = (int8_t) ((s_mate_page + pages - 1) % pages);
-            } else {
-                s_mate_page = (int8_t) ((s_mate_page + 1) % pages);
-            }
-            mate_build();
-        } else if (act == PET_UI_ACT_CONFIRM || act == PET_UI_ACT_BACK
-                   || act == PET_UI_ACT_MENU) {
-            s_mate_level = s_mate_tree_from;
+        if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
+            s_mate_level = 0;
             s_mate_sel = 0;
             mate_build();
             pet_audio_play(SND_CANCEL);
+            return;
+        }
+        if (act == PET_UI_ACT_PREV || act == PET_UI_ACT_NEXT) {
+            s_mate_sel += (act == PET_UI_ACT_NEXT) ? 1 : -1;
+            if (s_mate_sel < 0) { s_mate_sel = 2; }
+            if (s_mate_sel > 2) { s_mate_sel = 0; }
+            mate_build();
+            pet_audio_play(SND_CONFIRM);
+            return;
+        }
+        if (act == PET_UI_ACT_CONFIRM) {
+            uint8_t pages = mate_tree_pages();
+            if (s_mate_sel == 0) {
+                s_mate_page = (int8_t) ((s_mate_page + pages - 1) % pages);
+                mate_build();
+                pet_audio_play(SND_CONFIRM);
+            } else if (s_mate_sel == 2) {
+                s_mate_page = (int8_t) ((s_mate_page + 1) % pages);
+                mate_build();
+                pet_audio_play(SND_CONFIRM);
+            } else {
+                s_mate_level = 0;
+                s_mate_sel = 0;
+                mate_build();
+                pet_audio_play(SND_CANCEL);
+            }
         }
         return;
     }
 
+    // ---- 已婚等蛋 / 蛋就绪 ----
     if (s_ssnap.phase == PT_SOC_MARRIED
         || s_ssnap.phase == PT_SOC_EGG_READY) {
-        uint8_t rows = mate_married_rows();
         bool egg = s_ssnap.phase == PT_SOC_EGG_READY;
+        int ring = egg ? 3 : 2;
         if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
             modal_close();
             pet_audio_play(SND_CANCEL);
-        } else if (act == PET_UI_ACT_PREV) {
-            s_mate_sel = (s_mate_sel + rows - 1) % rows;
+        } else if (act == PET_UI_ACT_PREV || act == PET_UI_ACT_NEXT) {
+            s_mate_sel += (act == PET_UI_ACT_NEXT) ? 1 : -1;
+            if (s_mate_sel < 0) { s_mate_sel = ring - 1; }
+            if (s_mate_sel >= ring) { s_mate_sel = 0; }
             mate_build();
-        } else if (act == PET_UI_ACT_NEXT) {
-            s_mate_sel = (s_mate_sel + 1) % rows;
-            mate_build();
+            pet_audio_play(SND_CONFIRM);
         } else if (act == PET_UI_ACT_CONFIRM) {
             if (egg && s_mate_sel == 0) {
                 // 世代交替：引擎任务执行，刷新循环见到相位变化即关面板。
                 pet_app_soc_start_egg();
                 pet_audio_play(SND_EVOLVE);
-            } else if (s_mate_sel == rows - 1) {
+            } else if (s_mate_sel == ring - 1) {
+                // 环末位恒为 TREE；名人堂空时灰禁，OK 吞掉不动。
+                if (pt_social_hall_count(&s_ssnap) > 0) {
+                    mate_open_tree();
+                    pet_audio_play(SND_CONFIRM);
+                }
+            } else {
+                // 其余焦点位 = BACK。
                 modal_close();
                 pet_audio_play(SND_CANCEL);
-            } else {
-                mate_open_tree(1);
-                pet_audio_play(SND_CONFIRM);
             }
         }
         return;
     }
 
+    // ---- 返回语义（长按 OK / 双击 OK）----
     if (act == PET_UI_ACT_BACK || act == PET_UI_ACT_MENU) {
         if (s_mate_level == 1) {
             s_mate_level = 0;
-            s_mate_sel = s_mate_ci;
+            s_mate_sel = mate_ordinal_of((uint8_t) s_mate_ci);
             mate_build();
             pet_audio_play(SND_CANCEL);
         } else {
@@ -2629,72 +2816,67 @@ static void handle_mate_key(pet_ui_action_t act)
         return;
     }
 
-    if (s_mate_level == 0) {
-        uint8_t n = pt_social_candidate_count(&s_ssnap);
-        bool has_tree = pt_social_hall_count(&s_ssnap) > 0;
-        uint8_t rows = mate_level0_rows();
-        if (act == PET_UI_ACT_PREV) {
-            s_mate_sel = (s_mate_sel + rows - 1) % rows;
+    // ---- 动作页：4 行 + BACK ----
+    if (s_mate_level == 1) {
+        if (act == PET_UI_ACT_PREV || act == PET_UI_ACT_NEXT) {
+            s_mate_sel += (act == PET_UI_ACT_NEXT) ? 1 : -1;
+            if (s_mate_sel < 0) { s_mate_sel = 4; }
+            if (s_mate_sel > 4) { s_mate_sel = 0; }
             mate_build();
-        } else if (act == PET_UI_ACT_NEXT) {
-            s_mate_sel = (s_mate_sel + 1) % rows;
-            mate_build();
+            pet_audio_play(SND_CONFIRM);
         } else if (act == PET_UI_ACT_CONFIRM) {
-            if (s_mate_sel < n) {
-                // 第 k 个有效候选 → 槽位号
-                uint8_t k = 0;
-                for (uint8_t i = 0; i < PT_SOC_CANDIDATES; i += 1) {
-                    if (s_ssnap.cand[i].valid) {
-                        if (k == (uint8_t) s_mate_sel) {
-                            s_mate_ci = i;
-                            break;
-                        }
-                        k += 1;
-                    }
-                }
-                s_mate_level = 1;
-                s_mate_sel = 0;
+            switch (s_mate_sel) {
+            case 0:
+                pet_app_soc_greet((uint8_t) s_mate_ci);
+                break;
+            case 1:
+                pet_app_soc_gift((uint8_t) s_mate_ci);
+                break;
+            case 2:
+                pet_app_soc_propose((uint8_t) s_mate_ci, 0);
+                break;
+            case 3:
+                pet_app_soc_propose((uint8_t) s_mate_ci, 1);
+                break;
+            default:
+                s_mate_level = 0;
+                s_mate_sel = mate_ordinal_of((uint8_t) s_mate_ci);
                 mate_build();
-                pet_audio_play(SND_CONFIRM);
-            } else if (has_tree && s_mate_sel == n) {
-                mate_open_tree(0);
-                pet_audio_play(SND_CONFIRM);
-            } else {
-                modal_close();
                 pet_audio_play(SND_CANCEL);
+                return;
             }
         }
         return;
     }
 
-    // 动作页：5 行
-    if (act == PET_UI_ACT_PREV) {
-        s_mate_sel = (s_mate_sel + 4) % 5;
+    // ---- VISIT：n 张候选卡 -> BACK -> TREE ----
+    uint8_t n = pt_social_candidate_count(&s_ssnap);
+    bool tree_off = pt_social_hall_count(&s_ssnap) == 0;
+    int ring = (int) n + 2;
+    if (act == PET_UI_ACT_PREV || act == PET_UI_ACT_NEXT) {
+        s_mate_sel += (act == PET_UI_ACT_NEXT) ? 1 : -1;
+        if (s_mate_sel < 0) { s_mate_sel = ring - 1; }
+        if (s_mate_sel >= ring) { s_mate_sel = 0; }
         mate_build();
-    } else if (act == PET_UI_ACT_NEXT) {
-        s_mate_sel = (s_mate_sel + 1) % 5;
-        mate_build();
+        pet_audio_play(SND_CONFIRM);
     } else if (act == PET_UI_ACT_CONFIRM) {
-        switch (s_mate_sel) {
-        case 0:
-            pet_app_soc_greet((uint8_t) s_mate_ci);
-            break;
-        case 1:
-            pet_app_soc_gift((uint8_t) s_mate_ci);
-            break;
-        case 2:
-            pet_app_soc_propose((uint8_t) s_mate_ci, 0);
-            break;
-        case 3:
-            pet_app_soc_propose((uint8_t) s_mate_ci, 1);
-            break;
-        default:
-            s_mate_level = 0;
-            s_mate_sel = s_mate_ci;
+        if (s_mate_sel < (int) n) {
+            // 第 k 个有效候选 -> 槽位号。
+            uint8_t slots[PT_SOC_CANDIDATES];
+            (void) mate_slots(slots);
+            s_mate_ci = (int) slots[s_mate_sel];
+            s_mate_level = 1;
+            s_mate_sel = 0;
             mate_build();
+            pet_audio_play(SND_CONFIRM);
+        } else if (s_mate_sel == (int) n) {
+            modal_close();
             pet_audio_play(SND_CANCEL);
-            return;
+        } else if (!tree_off) {
+            mate_open_tree();
+            pet_audio_play(SND_CONFIRM);
         }
+        // TREE 灰禁：OK 吞掉不动。
     }
 }
 
@@ -5194,6 +5376,11 @@ static void refresh(lv_timer_t *timer)
     bool decor_changed = !s_have_dprev
                          || memcmp(&s_dprev, &s_dsnap, sizeof(s_dsnap)) != 0;
     if (decor_changed) {
+        // 按键路径的立即重建可能早于引擎快照到账；快照真正变化后补一次，
+        // 避免 STYLE 行停留在旧钱包/旧归属（历史：主题购买后行不刷新）。
+        if (s_mode == MODE_DECOR) {
+            style_build();
+        }
         if (!s_have_dprev || s_dprev.theme != s_dsnap.theme) {
             apply_room_theme();
             // 合成画布以墙色为底，主题换色后必须重算；蛋期重建仅重开晃动动画，无害。
@@ -5603,6 +5790,12 @@ void pet_ui_init(void)
     border(s_mcoin, COL_INK, 1);
     s_mcoin_lbl = label(s_mcoin, 11, 2, 27, &lv_font_montserrat_12,
                         COL_INK, "");
+    // PV2 batch6 STYLE：贝壳券 chip（金币 chip 左侧，蓝底蓝字蓝边）。
+    s_tshell = rect(panel, 112, 12, 34, 17, 8, COL_PILL_BLUE);
+    border(s_tshell, COL_BLUE, 1);
+    s_tshell_lbl = label(s_tshell, 0, 2, 34, &lv_font_montserrat_12,
+                         COL_BLUE, "");
+    hide(s_tshell);
     // 页码 < 1/2 >（标题右侧）。
     s_mp_prev = label(panel, 56, 15, 12, &lv_font_montserrat_12, COL_INK,
                        "<");
@@ -5687,6 +5880,55 @@ void pet_ui_init(void)
     border(s_df_next, COL_INK, 1);
     label(s_df_next, 0, 3, 20, &lv_font_montserrat_12, COL_INK, ">");
     hide(s_dfooter);
+
+    // PV2 batch5 FAMILY 页脚：三态 BACK/TREE、仅 BACK、‹ BACK ›。
+    s_mffooter = lv_obj_create(panel);
+    lv_obj_remove_flag(s_mffooter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_mffooter, 0, 200);
+    lv_obj_set_size(s_mffooter, 208, 22);
+    lv_obj_set_style_bg_opa(s_mffooter, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_mffooter, 0, 0);
+    lv_obj_set_style_pad_all(s_mffooter, 0, 0);
+    s_mf_back = rect(s_mffooter, 10, 0, 44, 20, 9, COL_DOCK_BG);
+    border(s_mf_back, COL_INK, 1);
+    label(s_mf_back, 0, 3, 44, &lv_font_montserrat_12, COL_INK, "BACK");
+    s_mf_tree = rect(s_mffooter, 154, 0, 44, 20, 9, COL_DOCK_BG);
+    border(s_mf_tree, COL_INK, 1);
+    label(s_mf_tree, 0, 3, 44, &lv_font_montserrat_12, COL_INK, "TREE");
+    s_mf_prev = rect(s_mffooter, 10, 0, 20, 20, 8, COL_DOCK_BG);
+    border(s_mf_prev, COL_INK, 1);
+    label(s_mf_prev, 0, 3, 20, &lv_font_montserrat_12, COL_INK, "<");
+    s_mf_mid = rect(s_mffooter, 34, 0, 46, 20, 9, COL_DOCK_BG);
+    border(s_mf_mid, COL_INK, 1);
+    label(s_mf_mid, 0, 3, 46, &lv_font_montserrat_12, COL_INK, "BACK");
+    s_mf_next = rect(s_mffooter, 178, 0, 20, 20, 8, COL_DOCK_BG);
+    border(s_mf_next, COL_INK, 1);
+    label(s_mf_next, 0, 3, 20, &lv_font_montserrat_12, COL_INK, ">");
+    hide(s_mffooter);
+
+    // PV2 batch6 签到：单颗居中 CLAIM 丸（常驻粉框，环长 1）。
+    s_cclaim = rect(panel, 72, 200, 64, 20, 9, COL_DOCK_BG);
+    border(s_cclaim, COL_SEL, 2);
+    label(s_cclaim, 0, 3, 64, &lv_font_montserrat_12, COL_INK, "CLAIM");
+    hide(s_cclaim);
+
+    // PV2 batch6 STYLE 页脚：WEAR / ROOM / THEME 三档（当前档粉填充，焦点 2px 粉框）。
+    s_tfooter = lv_obj_create(panel);
+    lv_obj_remove_flag(s_tfooter, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_tfooter, 0, 200);
+    lv_obj_set_size(s_tfooter, 208, 22);
+    lv_obj_set_style_bg_opa(s_tfooter, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_tfooter, 0, 0);
+    lv_obj_set_style_pad_all(s_tfooter, 0, 0);
+    static const int32_t TF_X[3] = { 10, 76, 142 };
+    static const char *const TF_NAME[3] = { "WEAR", "ROOM", "THEME" };
+    for (int i = 0; i < 3; i += 1) {
+        s_tf_tab[i] = rect(s_tfooter, TF_X[i], 0, 56, 20, 9, COL_DOCK_BG);
+        border(s_tf_tab[i], COL_INK, 1);
+        label(s_tf_tab[i], 0, 3, 56, &lv_font_montserrat_12, COL_INK,
+              TF_NAME[i]);
+    }
+    hide(s_tfooter);
 
     s_mback = label(panel, 0, 223, 208, &lv_font_montserrat_12, COL_HINT,
                     "hold OK - back");
