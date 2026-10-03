@@ -241,7 +241,6 @@ static int8_t s_agency_sel;
 static pt_job_id_t s_agency_ids[PT_JOB_COUNT];
 static uint8_t s_agency_n;
 static lv_obj_t *s_job_row[2];
-static lv_obj_t *s_agency_row[PT_JOB_COUNT];
 static bool s_g1_job;
 
 static int s_eff_kind = EFF_NONE;
@@ -4443,63 +4442,99 @@ static void gx_click(pet_btn_t btn)
 // 成年职业：办公室 + 职介所（07 §5）
 // ---------------------------------------------------------------------------
 
+// PV2 职介所第二行：全大写（无下伸部，不压双行卡底边），ASCII '-' 分隔。
 static void job_req_text(const pt_job_def_t *d, char *buf, size_t n)
 {
     if (d->always) {
-        snprintf(buf, n, "No requirement");
+        snprintf(buf, n, "NO REQUIREMENT");
         return;
     }
     int len = 0;
     if (d->need_mind) {
-        len += snprintf(buf + len, n - (size_t) len, "Mind %d", d->need_mind);
+        len += snprintf(buf + len, n - (size_t) len, "MIND %d", d->need_mind);
     }
     if (d->need_body) {
-        len += snprintf(buf + len, n - (size_t) len, "%sBody %d",
-                        len ? "  " : "", d->need_body);
+        len += snprintf(buf + len, n - (size_t) len, "%sBODY %d",
+                        len ? " - " : "", d->need_body);
     }
     if (d->need_art) {
-        snprintf(buf + len, n - (size_t) len, "%sArt %d",
-                 len ? "  " : "", d->need_art);
+        snprintf(buf + len, n - (size_t) len, "%sART %d",
+                 len ? " - " : "", d->need_art);
     }
 }
 
+// PV2 办公室（冻结稿 pv2-job 帧①-③）：hero 卡 + 班次珠/工资两行 + 两张动作卡。
 static void job_office_build(void)
 {
     lv_obj_clean(s_modal_body);
+    frame_pv2(false);
     lv_label_set_text(s_modal_title, "WORK");
     const pt_job_def_t *d = pt_job_def((pt_job_id_t) s_jobs.job);
-    char buf[40];
+    char buf[24];
 
-    label(s_modal_body, 4, 4, 184, &lv_font_montserrat_20, COL_INK, d->name);
+    // hero：职业名 + 绑定小游戏；劳模贴纸周在卡内右上（无贴纸时不留跳动）。
+    lv_obj_t *hero = rect(s_modal_body, 0, 0, 192, 42, 10, COL_CARD_WHITE);
+    border(hero, COL_HAIR, 1);
+    llabel(hero, 12, 4, 120, &lv_font_montserrat_14, COL_INK, d->name);
     snprintf(buf, sizeof(buf), "%s mini-game", GAMES_NAME[d->game]);
-    label(s_modal_body, 4, 32, 184, &lv_font_montserrat_14, COL_DIM, buf);
-    snprintf(buf, sizeof(buf), "Shifts today: %d/3",
-             (int) s_jobs.shifts_today);
-    label(s_modal_body, 4, 54, 184, &lv_font_montserrat_14, COL_INK, buf);
-    snprintf(buf, sizeof(buf), "Wage: %u/%u/%u G",
-             (unsigned) d->wage[0], (unsigned) d->wage[1],
-             (unsigned) d->wage[2]);
-    label(s_modal_body, 4, 74, 184, &lv_font_montserrat_14, COL_YELLOW, buf);
+    llabel(hero, 12, 24, 120, &lv_font_montserrat_12, COL_SUB, buf);
     if (s_jobs.worker_sticker) {
-        label(s_modal_body, 4, 94, 184, &lv_font_montserrat_14, COL_GREEN,
-              "* Model worker");
+        // 劳模徽章：金星 + "Model"（实测 14pt 最长职业名 Weathercast 止于 x104、
+        // 12pt 最长副标题大写顶约 x127 且顶点 y27.6，故徽章右钉、宽按实测、y9）。
+        const char *mwtxt = "Model";
+        int32_t mtw = text_w12(mwtxt);
+        int32_t mpw = mtw + 17;   // 星点 5 + 间距 + 两侧内边距
+        int32_t mpx = 192 - 2 - mpw;
+        lv_obj_t *mw = rect(s_modal_body, mpx, 9, mpw, 16, 8,
+                            COL_CARD_GREENBG);
+        border(mw, COL_GREEN, 1);
+        rect(s_modal_body, mpx + 5, 15, 5, 5, 2, COL_YELLOW);
+        llabel(s_modal_body, mpx + 13, 11, 0, &lv_font_montserrat_12,
+               COL_GREEN, mwtxt);
     }
 
+    // 信息两行：班次珠（0..2）与三档工资金丸。
+    // "Shifts today" 实测宽 78.4（止于 x90），班次珠自 x96 起。
+    llabel(s_modal_body, 12, 51, 90, &lv_font_montserrat_12, COL_INK,
+           "Shifts today");
+    for (uint8_t i = 0; i < PT_JOB_SHIFTS_PER_DAY; i += 1) {
+        rect(s_modal_body, 96 + i * 18, 56, 14, 6, 3,
+             i < s_jobs.shifts_today ? COL_TAB_ON : COL_PIP_OFF);
+    }
+    llabel(s_modal_body, 12, 69, 40, &lv_font_montserrat_12, COL_SUB,
+           "Wage");
+    snprintf(buf, sizeof(buf), "%u/%u/%u G",
+             (unsigned) d->wage[0], (unsigned) d->wage[1],
+             (unsigned) d->wage[2]);
+    int32_t pw = text_w12(buf) + 12;
+    lv_obj_t *gp = rect(s_modal_body, 184 - pw, 66, pw, 16, 8, COL_COIN_BG);
+    border(gp, COL_YELLOW, 1);
+    label(gp, 0, 2, pw, &lv_font_montserrat_12, COL_BROWN, buf);
+
+    // 两张动作卡：不可开工时 Work shift 整卡置灰，右缘显实际班次计数。
     bool can = pt_jobs_can_work(&s_jobs) && !s_snap.sick
         && (s_snap.stage == PT_STAGE_ADULT
             || s_snap.stage == PT_STAGE_SENIOR)
         && s_snap.energy >= PT_CFG_JOB_MIN_ENERGY;
-    s_job_row[0] = rect(s_modal_body, 8, 132, 176, 28, 8,
-                        can ? COL_PANEL : COL_PIP_OFF);
-    label(s_job_row[0], 0, 4, 176, &lv_font_montserrat_14,
-          can ? COL_INK : COL_DIM, can ? "Work shift  (OK)"
-                                       : "Rest (no shift now)");
-    s_job_row[1] = rect(s_modal_body, 8, 168, 176, 28, 8, COL_PANEL);
-    label(s_job_row[1], 0, 4, 176, &lv_font_montserrat_14, COL_INK,
-          "Job agency");
+    s_job_row[0] = rect(s_modal_body, 0, 94, 192, 28, 10,
+                        can ? COL_CARD_WHITE : COL_DIS_BG);
+    llabel(s_job_row[0], 12, 6, 100, &lv_font_montserrat_12,
+           can ? COL_INK : COL_DIS_TX, "Work shift");
+    if (can) {
+        rlabel12(s_job_row[0], 180, 6, COL_SEL, "Start");
+    } else {
+        char cnt[6];
+        snprintf(cnt, sizeof(cnt), "%u/3",
+                 (unsigned) s_jobs.shifts_today);
+        rlabel12(s_job_row[0], 180, 6, COL_DIS_TX, cnt);
+    }
+    s_job_row[1] = rect(s_modal_body, 0, 126, 192, 28, 10, COL_CARD_WHITE);
+    llabel(s_job_row[1], 12, 6, 100, &lv_font_montserrat_12, COL_INK,
+           "Job agency");
+    rlabel12(s_job_row[1], 180, 6, COL_BLUE, "Go");
     for (uint8_t i = 0; i < 2; i += 1) {
-        border(s_job_row[i], i == (uint8_t) s_job_sel ? COL_SEL : COL_INK,
-               i == (uint8_t) s_job_sel ? 3 : 1);
+        border(s_job_row[i], i == (uint8_t) s_job_sel ? COL_SEL : COL_HAIR,
+               i == (uint8_t) s_job_sel ? 2 : 1);
     }
 }
 
@@ -4542,24 +4577,56 @@ static void job_start_shift(void)
     }
 }
 
+// PV2 职介所（冻结稿 pv2-job 帧④⑤）：双行卡 192x30、步进 31，窗口 5 行随焦点滚动。
+#define JOB_AG_WIN 5
 static void agency_build(void)
 {
     lv_obj_clean(s_modal_body);
+    frame_pv2(false);
     lv_label_set_text(s_modal_title, "AGENCY");
     s_agency_n = pt_jobs_list(s_snap.skill, s_agency_ids, PT_JOB_COUNT);
-    char buf[40];
-    for (uint8_t i = 0; i < s_agency_n && i < PT_JOB_COUNT; i += 1) {
-        const pt_job_def_t *d = pt_job_def(s_agency_ids[i]);
-        lv_obj_t *r = rect(s_modal_body, 4, 4 + i * 23, 184, 21, 6,
-                           COL_PANEL);
-        char req[28];
+    if ((uint8_t) s_agency_sel >= s_agency_n) {
+        s_agency_sel = 0;
+    }
+    // 滚动窗口：焦点落到第 6 行起窗口跟随；到底钳制。
+    uint8_t win = 0;
+    if (s_agency_n > JOB_AG_WIN) {
+        if ((uint8_t) s_agency_sel >= JOB_AG_WIN) {
+            win = (uint8_t) s_agency_sel - (JOB_AG_WIN - 1);
+        }
+        uint8_t maxwin = s_agency_n - JOB_AG_WIN;
+        if (win > maxwin) {
+            win = maxwin;
+        }
+    }
+    uint8_t shown = s_agency_n - win;
+    if (shown > JOB_AG_WIN) {
+        shown = JOB_AG_WIN;
+    }
+
+    for (uint8_t k = 0; k < shown; k += 1) {
+        uint8_t idx = win + k;
+        const pt_job_def_t *d = pt_job_def(s_agency_ids[idx]);
+        bool on = idx == (uint8_t) s_agency_sel;
+        lv_obj_t *r = rect(s_modal_body, 0, (int32_t) k * 31, 192, 30,
+                           8, COL_CARD_WHITE);
+        border(r, on ? COL_SEL : COL_HAIR, on ? 2 : 1);
+        llabel(r, 10, 1, 104, &lv_font_montserrat_12, COL_INK, d->name);
+        if (s_agency_ids[idx] == s_jobs.job) {
+            rlabel12(r, 180, 1, COL_GREEN, "NOW");
+        } else {
+            char wbuf[20];
+            snprintf(wbuf, sizeof(wbuf), "%u/%u/%u G",
+                     (unsigned) d->wage[0], (unsigned) d->wage[1],
+                     (unsigned) d->wage[2]);
+            int32_t pw = text_w12(wbuf) + 12;
+            lv_obj_t *p = rect(r, 184 - pw, 3, pw, 14, 7, COL_COIN_BG);
+            border(p, COL_YELLOW, 1);
+            label(p, 0, 1, pw, &lv_font_montserrat_12, COL_BROWN, wbuf);
+        }
+        char req[32];
         job_req_text(d, req, sizeof(req));
-        snprintf(buf, sizeof(buf), "%s%s  %s",
-                 d->name, s_agency_ids[i] == s_jobs.job ? " *" : "", req);
-        label(r, 4, 2, 176, &lv_font_montserrat_14, COL_INK, buf);
-        s_agency_row[i] = r;
-        border(r, i == (uint8_t) s_agency_sel ? COL_SEL : COL_INK,
-               i == (uint8_t) s_agency_sel ? 3 : 1);
+        llabel(r, 10, 14, 172, &lv_font_montserrat_12, COL_SUB, req);
     }
 }
 
