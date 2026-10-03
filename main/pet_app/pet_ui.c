@@ -5967,7 +5967,7 @@ void pet_ui_init(void)
                       COL_INK, "?");
     hide(s_eff_cont);
 
-    // 死亡纪念
+    // 死亡纪念（PV2 batch8：全屏深紫 + 居中纪念卡，零位图提灯标记）。
     s_memorial = lv_obj_create(s_scr);
     lv_obj_remove_flag(s_memorial, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(s_memorial, 0, 0);
@@ -5977,18 +5977,36 @@ void pet_ui_init(void)
     lv_obj_set_style_bg_opa(s_memorial, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(s_memorial, 0, 0);
     lv_obj_set_style_pad_all(s_memorial, 0, 0);
-    label(s_memorial, 0, 60, LCD_W, &lv_font_montserrat_14, 0x9C8FB0,
-          "In memory of");
+    // 纪念卡：屏 (36,64) 168x192 r16，深紫卡 + 薰衣紫 28% 发丝边。
+    lv_obj_t *mcard = rect(s_memorial, 36, 64, 168, 192, 16, 0x2B2442);
+    lv_obj_set_style_border_color(mcard, lv_color_hex(0xC9BBDD), 0);
+    lv_obj_set_style_border_width(mcard, 1, 0);
+    lv_obj_set_style_border_opa(mcard, 71, 0);
+    // 提灯标记：36x36 圆环（2px）+ 8x8 金焰点，全用矩形，无位图。
+    lv_obj_t *mring = rect(s_memorial, 66, 88, 36, 36, 18, 0x2B2442);
+    lv_obj_set_style_bg_opa(mring, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(mring, lv_color_hex(0xC9BBDD), 0);
+    lv_obj_set_style_border_width(mring, 2, 0);
+    rect(s_memorial, 80, 102, 8, 8, 4, 0xF2B134);
+    // 基线 y152/176/210/230/250（冻结稿）；label 顶 = 基线 - (line_height-base_line)。
+    lv_obj_t *mkicker = label(s_memorial, 0, 140, LCD_W,
+                              &lv_font_montserrat_12, 0x9C8FB0,
+                              "IN MEMORY OF");
+    lv_obj_set_style_text_letter_space(mkicker, 2, 0);
     // 名字与年龄行在事件时回填（固定对象，避免重复创建）。
-    s_memorial_name = label(s_memorial, 0, 88, LCD_W,
+    s_memorial_name = label(s_memorial, 0, 158, LCD_W,
                             &lv_font_montserrat_20, 0xF0E6D8, "");
-    s_memorial_line = label(s_memorial, 0, 128, LCD_W,
-                            &lv_font_montserrat_14, 0xC9BBDD, "");
-    s_memorial_tier = label(s_memorial, 0, 156, LCD_W,
-                            &lv_font_montserrat_14, 0x9C8FB0, "");
-    label(s_memorial, 0, 180, LCD_W, &lv_font_montserrat_20, 0xF0E6D8, "R.I.P.");
-    label(s_memorial, 0, 240, LCD_W, &lv_font_montserrat_14, 0x9C8FB0,
-          "OK: new egg");
+    lv_obj_t *mhair = rect(s_memorial, 96, 190, 48, 1, 0, 0xC9BBDD);
+    lv_obj_set_style_bg_opa(mhair, 77, 0);
+    s_memorial_line = label(s_memorial, 0, 198, LCD_W,
+                            &lv_font_montserrat_12, 0xC9BBDD, "");
+    s_memorial_tier = label(s_memorial, 0, 218, LCD_W,
+                            &lv_font_montserrat_12, 0x9C8FB0, "");
+    lv_obj_t *mrip = label(s_memorial, 0, 237, LCD_W,
+                           &lv_font_montserrat_14, 0xF0E6D8, "R.I.P.");
+    lv_obj_set_style_text_letter_space(mrip, 1, 0);
+    label(s_memorial, 0, 268, LCD_W, &lv_font_montserrat_12, 0x7E7294,
+          "OK - new egg");
     hide(s_memorial);
 
     // 先拿一帧状态再开定时器，避免首帧空画。
