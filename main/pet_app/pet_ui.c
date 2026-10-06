@@ -847,7 +847,7 @@ static void dock_refresh_selected(void)
 // ===========================================================================
 // PV2 统一卡片弹层（定稿 pet-redesign/pv2-cards.html）
 // 面板局部坐标：页眉 0..36，卡片区 42..198（4 张 192x36），页脚 200..220，
-// 返回提示基线约 234。frame_legacy 供 PV2 尚未覆盖的旧弹层使用原几何。
+// 返回提示基线约 234。所有卡片弹层统一走 frame_pv2 几何。
 // ===========================================================================
 
 static void toast_hide_cb(lv_timer_t *t)
@@ -867,31 +867,6 @@ static void toast_show(const char *msg)
         lv_timer_delete(s_toast_timer);
     }
     s_toast_timer = lv_timer_create(toast_hide_cb, 1200, NULL);
-}
-
-static void frame_legacy(void)
-{
-    lv_obj_set_pos(s_modal_body, 8, 44);
-    lv_obj_set_size(s_modal_body, 192, 188);
-    hide(s_mhair);
-    hide(s_mcoin);
-    hide(s_mp_prev);
-    hide(s_mp_cur);
-    hide(s_mp_next);
-    hide(s_mfooter);
-    hide(s_sfooter);
-    hide(s_dfooter);
-    hide(s_mffooter);
-    hide(s_tfooter);
-    hide(s_cclaim);
-    hide(s_tshell);
-    hide(s_mcoin);
-    hide(s_mback);
-    hide(s_toast_box);
-    if (s_toast_timer != NULL) {
-        lv_timer_delete(s_toast_timer);
-        s_toast_timer = NULL;
-    }
 }
 
 static void frame_pv2(bool with_footer)
@@ -1234,7 +1209,7 @@ static void modal_open(void)
 {
     // 全屏弹层盖住房间：停掉宠物身上的持续动画，弹层期间不产生无谓失效。
     lv_anim_delete(s_creature, NULL);
-    frame_legacy();
+    // 框架 chrome 由各 builder 的 frame_pv2 / mate_frame / dex_frame 自建。
     show(s_modal);
     lv_obj_move_foreground(s_modal);
 }
@@ -1489,22 +1464,8 @@ static void status_footer_refresh(void)
 static void status_build(void)
 {
     lv_obj_clean(s_modal_body);
-    lv_obj_set_pos(s_modal_body, 8, 42);
-    lv_obj_set_size(s_modal_body, 192, 156);
-    show(s_mhair);
-    show(s_mback);
-    hide(s_mfooter);
+    frame_pv2(false);
     show(s_sfooter);
-    hide(s_dfooter);
-    hide(s_mcoin);
-    hide(s_mp_prev);
-    hide(s_mp_cur);
-    hide(s_mp_next);
-    hide(s_toast_box);
-    if (s_toast_timer != NULL) {
-        lv_timer_delete(s_toast_timer);
-        s_toast_timer = NULL;
-    }
 
     lv_label_set_text(s_modal_title, "STATUS");
     if (s_status_page == 0) {
